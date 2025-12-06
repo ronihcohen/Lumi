@@ -163,6 +163,10 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
     Returns:
         list: A list of tuples representing the alignment.
     """
+    # Optimization: Pre-process strings to avoid repeated cleaning in the inner loop.
+    seq1_cleaned = [word.lower().strip(".,!?\"'") for word in seq1]
+    seq2_cleaned = [word['word'].lower().strip(".,!?\"'") for word in seq2]
+
     n = len(seq1)
     m = len(seq2)
     score = np.zeros((n + 1, m + 1))
@@ -176,7 +180,8 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
     # Fill the score matrix
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            match = score[i - 1][j - 1] + (match_score if seq1[i - 1].lower() == seq2[j - 1]['word'].lower().strip(".,!?\"'") else mismatch_score)
+            match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
+            match = score[i - 1][j - 1] + match_val
             delete = score[i - 1][j] + gap_penalty
             insert = score[i][j - 1] + gap_penalty
             score[i][j] = max(match, delete, insert)
@@ -190,7 +195,8 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         score_up = score[i][j - 1]
         score_left = score[i - 1][j]
 
-        if score_current == score_diagonal + (match_score if seq1[i - 1].lower() == seq2[j - 1]['word'].lower().strip(".,!?\"'") else mismatch_score):
+        match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
+        if score_current == score_diagonal + match_val:
             align1.append(seq1[i - 1])
             align2.append(seq2[j - 1])
             i -= 1

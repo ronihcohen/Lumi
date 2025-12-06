@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-This document outlines the design for an application that synchronizes audiobook playback with its corresponding text. The app will provide an immersive reading experience by highlighting the text as the audiobook plays, allowing users to read and listen simultaneously.
+This document outlines the design for an pip install -r c:\Code\Lumi\sync_service\requirements.txt
 
 ## 2. Features
 

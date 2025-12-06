@@ -2,32 +2,23 @@
 from faster_whisper import WhisperModel
 import gc
 import torch
-import os
 import json
 from pathlib import Path
-import pydub
 import numpy as np
-import argparse
 
-def process_audiobook(audio_path: str, text_path: str, output_dir: str):
+def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
     Processes an audiobook and its text to generate a synchronization map.
 
     Args:
+        model (WhisperModel): The loaded Whisper model.
         audio_path (str): Path to the audiobook file.
         text_path (str): Path to the text file.
         output_dir (str): Directory to save the output files.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size = 16
-    compute_type = "int8" if device == "cpu" else "float16"
-
-    # 1. Load and transcribe the audio
-    print("Loading Whisper model...")
-    model = WhisperModel("large-v2", device=device, compute_type=compute_type)
-    
+    # 1. Transcribe the audio
     print("Transcribing audio with word-level timestamps...")
-    segments, info = model.transcribe(audio_path, word_timestamps=True)
+    segments, info = model.transcribe(audio_path, word_timestamps=True, vad_filter=True)
     
     # Save the transcribed words
     output_path = Path(output_dir) / "transcribed_words.json"
@@ -72,57 +63,67 @@ def process_audiobook(audio_path: str, text_path: str, output_dir: str):
     with open(ground_truth_path, "w", encoding="utf-8") as f:
         json.dump(ground_truth_segments, f, indent=4)
 
-    # 3. Align and Map
-    print("Aligning transcribed text with ground-truth text...")
-    
+    # 3. Align and Map (Segment by Segment)
+    print("Aligning transcribed text with ground-truth text (segment by segment)...")
+    from tqdm import tqdm # Import tqdm for progress bar
+
     sync_map = {}
-    
-    # Get all words from the ground-truth segments
-    all_ground_truth_words = [word for segment in ground_truth_segments for word in segment['text'].split()]
-    
-    # Perform alignment
-    alignment = needleman_wunsch(all_ground_truth_words, word_level_data)
+    transcribed_word_cursor = 0
+    SEARCH_WINDOW_MULTIPLIER = 3 # Look at 3x the number of ground-truth words
+    MIN_SEARCH_WINDOW = 100 # With a minimum of 100 words
 
-    # Create a map from ground-truth words to timestamps
-    word_to_time = {}
-    current_word_index = 0
-    for gt_word, whisper_word_data in alignment:
-        if gt_word is not None and whisper_word_data is not None:
-            word_to_time[current_word_index] = {
-                "start": whisper_word_data["start"],
-                "end": whisper_word_data["end"]
-            }
-        if gt_word is not None:
-            current_word_index += 1
-
-    # 4. Generate the final sync map
-    print("Generating final sync map...")
-    current_word_index = 0
-    for segment in ground_truth_segments:
+    for segment in tqdm(ground_truth_segments):
         segment_words = segment['text'].split()
-        num_segment_words = len(segment_words)
+        if not segment_words:
+            continue
+
+        # Define a search window in the transcribed text to find a match
+        start_pos = transcribed_word_cursor
+        window_size = max(len(segment_words) * SEARCH_WINDOW_MULTIPLIER, MIN_SEARCH_WINDOW)
+        end_pos = min(start_pos + window_size, len(word_level_data))
         
+        search_window = word_level_data[start_pos:end_pos]
+        
+        if not search_window:
+            print("No more transcribed words to process. Stopping alignment.")
+            break
+
+        # Perform alignment on the smaller window
+        alignment = needleman_wunsch(segment_words, search_window)
+
+        # Extract timestamps and find how many transcribed words were consumed
         start_time, end_time = None, None
-        
-        # Find the start time
-        for i in range(num_segment_words):
-            if current_word_index + i in word_to_time:
-                start_time = word_to_time[current_word_index + i]["start"]
-                break
-        
-        # Find the end time
-        for i in range(num_segment_words - 1, -1, -1):
-            if current_word_index + i in word_to_time:
-                end_time = word_to_time[current_word_index + i]["end"]
-                break
+        last_matched_word_index_in_window = -1
+
+        # To get the index of the word object in the window
+        word_to_index_in_window = {id(word): i for i, word in enumerate(search_window)}
+
+        for gt_word, whisper_word in alignment:
+            if gt_word is not None and whisper_word is not None:
+                if start_time is None: # First match
+                    start_time = whisper_word["start"]
+                
+                # Keep updating end_time and the last matched index
+                end_time = whisper_word["end"]
+                last_matched_word_index_in_window = word_to_index_in_window.get(id(whisper_word), -1)
 
         if start_time is not None and end_time is not None:
             sync_map[segment["id"]] = {
                 "start": start_time,
                 "end": end_time
             }
-        
-        current_word_index += num_segment_words
+            
+            # Move the cursor forward to the word after the last matched word
+            if last_matched_word_index_in_window != -1:
+                transcribed_word_cursor = start_pos + last_matched_word_index_in_window + 1
+        else:
+            # If no alignment was found in the search window, something is wrong.
+            # For now, we'll just advance the cursor by the number of words in the segment
+            # as a fallback, but a more robust solution might be needed.
+            print(f"Warning: No alignment found for segment ID {segment['id']}. This may indicate a significant mismatch.")
+            # Fallback: advance the cursor by an estimated amount
+            transcribed_word_cursor += len(segment_words)
+
 
     # Save the final sync map
     sync_map_path = Path(output_dir) / "sync_map.json"
@@ -197,11 +198,11 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         
     return list(zip(reversed(align1), reversed(align2)))
 
-def main(audio_path, text_path, output_dir):
+def main(model, audio_path, text_path, output_dir):
     """
     Main function to run the synchronization process.
     """
-    process_audiobook(audio_path, text_path, output_dir)
+    process_audiobook(model, audio_path, text_path, output_dir)
 
 if __name__ == "__main__":
     test_data_dir = Path("c:/Code/Lumi/data")
@@ -210,13 +211,29 @@ if __name__ == "__main__":
     if not test_data_dir.exists():
         print(f"Error: Directory not found at '{test_data_dir}'")
     else:
-        # Find the first .mp3 and .txt pair
         audio_file = next(test_data_dir.glob("*.mp3"), None)
-        text_file = next(test_data_dir.glob("*.txt"), None)
 
-        if audio_file and text_file:
+        if audio_file:
+            text_file = audio_file.with_suffix(".txt")
+
+            # Load model
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "int8_float16" if device == "cpu" else "int8_float16"
+            print("Loading Whisper model...")
+            model = WhisperModel("large-v2", device=device, compute_type=compute_type)
+
+            if not text_file.exists():
+                print(f"Text file not found for {audio_file.name}. Generating text from audio...")
+                segments, _ = model.transcribe(str(audio_file))
+                
+                full_text = "".join(segment.text for segment in segments)
+                
+                with open(text_file, "w", encoding="utf-8") as f:
+                    f.write(full_text)
+                print(f"Generated text file: {text_file}")
+
             if not output_dir.exists():
                 output_dir.mkdir(parents=True)
-            main(str(audio_file), str(text_file), str(output_dir))
+            main(model, str(audio_file), str(text_file), str(output_dir))
         else:
-            print("No matching .mp3 and .txt file pair found in the test_data directory.")
+            print("No .mp3 file found in the test_data directory.")

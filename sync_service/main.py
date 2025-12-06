@@ -1,23 +1,33 @@
 # main.py
-from faster_whisper import WhisperModel
-import gc
-import torch
-import json
-from pathlib import Path
-import numpy as np
-from tqdm import tqdm
 import argparse
+import gc
+import json
 import logging
 import math
+import queue
 import subprocess
 import threading
-import queue
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple, Generator, Any
+
+import numpy as np
+import torch
+from faster_whisper import WhisperModel
+from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_audio_duration(audio_path: str) -> float:
-    """Get the duration of the audio file using ffprobe."""
+    """
+    Get the duration of the audio file in seconds using ffprobe.
+    
+    Args:
+        audio_path: Path to the audio file.
+        
+    Returns:
+        Duration in seconds as a float.
+    """
     cmd = [
         "ffprobe",
         "-v", "error",
@@ -34,8 +44,17 @@ def get_audio_duration(audio_path: str) -> float:
 
 def load_audio_chunk(audio_path: str, start_time: float, duration: float, sr=16000) -> np.ndarray:
     """
-    Load a specific chunk of audio using ffmpeg directly to numpy array.
+    Load a specific chunk of audio using ffmpeg directly to a numpy array.
     Reduces memory usage by not loading the full file.
+    
+    Args:
+        audio_path: Path to the audio file.
+        start_time: Start time in seconds.
+        duration: Duration to read in seconds.
+        sr: Sample rate (default 16000 for Whisper).
+        
+    Returns:
+        Numpy array of float32 audio samples.
     """
     cmd = [
         "ffmpeg",
@@ -60,8 +79,7 @@ def load_audio_chunk(audio_path: str, start_time: float, duration: float, sr=160
         if not out:
             return np.array([], dtype=np.float32)
             
-        # Convert raw bytes to numpy array
-        # s16le = int16
+        # Convert raw bytes to numpy array (s16le = int16)
         audio_int16 = np.frombuffer(out, dtype=np.int16)
         
         # Normalize to float32 [-1, 1]
@@ -73,11 +91,19 @@ def load_audio_chunk(audio_path: str, start_time: float, duration: float, sr=160
         logging.error(f"Error loading chunk {start_time}-{start_time+duration}: {e}")
         return np.array([], dtype=np.float32)
 
-def transcribe_chunked(model: WhisperModel, audio_path: str, chunk_duration_sec=3600):
+def transcribe_audio_stream(model: WhisperModel, audio_path: str, chunk_duration_sec: int = 3600) -> Tuple[List[Dict[str, Any]], float]:
     """
     Transcribes a long audio file by streaming chunks using ffmpeg.
     Implements a Producer-Consumer pattern to prefetch the next chunk 
     while transcribing the current one.
+    
+    Args:
+        model: Loaded WhisperModel instance.
+        audio_path: Path to the audio file.
+        chunk_duration_sec: Length of each chunk in seconds (default 1 hour).
+        
+    Returns:
+        Tuple of (all_segments_data, total_duration_sec).
     """
     logging.info(f"Getting duration for {audio_path}...")
     duration_sec = get_audio_duration(audio_path)
@@ -86,19 +112,19 @@ def transcribe_chunked(model: WhisperModel, audio_path: str, chunk_duration_sec=
     
     all_segments = []
     
-    # Queue for prefetching: (index, audio_data)
+    # Queue for prefetching: (index, audio_data, time_offset)
     # Size 1 is enough for double buffering
     prefetch_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
 
     def prefetch_worker():
+        """Background thread to load audio chunks."""
         for i in range(total_chunks):
             if stop_event.is_set():
                 break
                 
             start_time = i * chunk_duration_sec
-            # Ensure we don't request past the end, though ffmpeg handles it gracefully usually
-            # But calculating exact duration helps avoids empty fetches
+            # Calculate exact duration to strictly avoid reading past end
             dur = min(chunk_duration_sec, duration_sec - start_time)
             
             logging.info(f"Prefetching chunk {i+1}/{total_chunks}...")
@@ -126,14 +152,14 @@ def transcribe_chunked(model: WhisperModel, audio_path: str, chunk_duration_sec=
 
             logging.info(f"Transcribing chunk {i+1}/{total_chunks} (Offset: {time_offset}s, Size: {len(audio_chunk)} samples)...")
             
-            segments, _ = model.transcribe(
+            segments_gen, _ = model.transcribe(
                 audio_chunk, 
                 word_timestamps=True, 
                 vad_filter=True
             )
             
-            # Process immediately to free memory
-            for segment in segments:
+            # Process generator immediately to free memory
+            for segment in segments_gen:
                 segment_start = segment.start + time_offset
                 segment_end = segment.end + time_offset
                 
@@ -167,7 +193,6 @@ def transcribe_chunked(model: WhisperModel, audio_path: str, chunk_duration_sec=
         stop_event.set()
         raise
     finally:
-        # Ensure thread joins if we break early
         stop_event.set()
         # Empty queue to let thread finish if it's blocked on put
         while not prefetch_queue.empty():
@@ -179,229 +204,35 @@ def transcribe_chunked(model: WhisperModel, audio_path: str, chunk_duration_sec=
 
     return all_segments, duration_sec
 
-def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
-    audio_path = Path(audio_path)
-    output_base_name = audio_path.stem
-    output_dir = Path(output_dir)
-
-    sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
-    if sync_map_path.exists():
-        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
-        return
-
-    # 1. Transcribe the audio (CHUNKED STRATEGY)
-    logging.info("Step 1/3: Transcribing audio with word-level timestamps...")
-    
-    # Use the memory-safe chunked transcriber
-    raw_segments, duration = transcribe_chunked(model, str(audio_path))
-    
-    # Flatten word data for alignment
-    word_level_data = []
-    for seg in raw_segments:
-        if seg.get("words"):
-            word_level_data.extend(seg["words"])
-
-    # Save the transcribed words
-    output_path = output_dir / f"{output_base_name}_transcribed_words.json"
-    with open(output_path, "w") as f:
-        json.dump(word_level_data, f, indent=4)
-    logging.info(f"Saved transcribed words to {output_path}")
-
-    # Clean up massive audio array if it exists
-    gc.collect()
-
-    # 2. Process the ground-truth text
-    logging.info("Step 2/3: Processing ground-truth text...")
-    with open(text_path, "r", encoding="utf-8") as f:
-        ground_truth_text = f.read()
-    
-    # Improved Segmentation: prevent massive blocks that crash alignment
-    ground_truth_segments = []
-    raw_paragraphs = ground_truth_text.split('\n\n')
-    
-    p_counter = 1
-    for p_text in raw_paragraphs:
-        cleaned = " ".join(p_text.split())
-        if not cleaned: continue
-        
-        # Safety Check: If a paragraph is > 300 words, split it by sentences
-        # This keeps the Needleman-Wunsch matrix small.
-        words_in_p = cleaned.split()
-        if len(words_in_p) > 300:
-            # Simple sentence split approximation
-            sentences = cleaned.replace('. ', '.\n').replace('? ', '?\n').replace('! ', '!\n').split('\n')
-            for s in sentences:
-                if s.strip():
-                    ground_truth_segments.append({
-                        "id": f"p{p_counter}",
-                        "text": s.strip()
-                    })
-                    p_counter += 1
-        else:
-            ground_truth_segments.append({
-                "id": f"p{p_counter}",
-                "text": cleaned
-            })
-            p_counter += 1
-
-    ground_truth_path = output_dir / f"{output_base_name}_segments.json"
-    with open(ground_truth_path, "w", encoding="utf-8") as f:
-        json.dump(ground_truth_segments, f, indent=4)
-
-    # 3. Align and Map
-    logging.info("Step 3/3: Aligning transcribed text with ground-truth text...")
-
-    sync_map = {}
-    transcribed_word_cursor = 0
-    
-    # Optimization: Pre-calculate transcribed words for faster searching
-    # We only look ahead somewhat to avoid O(N^2) on the whole book
-    SEARCH_WINDOW_MULTIPLIER = 3
-    MIN_SEARCH_WINDOW = 100
-    MAX_SEARCH_WINDOW = 2000 # Hard cap to prevent memory spikes in NW matrix
-
-    for segment in tqdm(ground_truth_segments, desc="Aligning segments"):
-        segment_words = segment['text'].split()
-        if not segment_words:
-            continue
-
-        start_pos = transcribed_word_cursor
-        
-        # Dynamic window size with safety cap
-        window_size = max(len(segment_words) * SEARCH_WINDOW_MULTIPLIER, MIN_SEARCH_WINDOW)
-        window_size = min(window_size, MAX_SEARCH_WINDOW) 
-        
-        end_pos = min(start_pos + window_size, len(word_level_data))
-        search_window = word_level_data[start_pos:end_pos]
-        
-        if not search_window:
-            break
-
-        # Run memory-optimized alignment
-        alignment = needleman_wunsch(segment_words, search_window)
-
-        start_time, end_time = None, None
-        last_matched_idx = -1
-        
-        # Create a lookup for object identity to find index
-        # (Converting to list of IDs is faster than searching list of dicts)
-        window_ids = [id(w) for w in search_window]
-
-        for gt_word, whisper_word in alignment:
-            if gt_word is not None and whisper_word is not None:
-                if start_time is None:
-                    start_time = whisper_word["start"]
-                end_time = whisper_word["end"]
-                
-                # Find index in window efficiently
-                try:
-                    idx = window_ids.index(id(whisper_word))
-                    last_matched_idx = idx
-                except ValueError:
-                    pass
-
-        if start_time is not None and end_time is not None:
-            sync_map[segment["id"]] = {
-                "start": start_time,
-                "end": end_time
-            }
-            if last_matched_idx != -1:
-                transcribed_word_cursor = start_pos + last_matched_idx + 1
-        else:
-            transcribed_word_cursor += len(segment_words) # Fallback
-
-    with open(sync_map_path, "w", encoding="utf-8") as f:
-        json.dump(sync_map, f, indent=4)
-    logging.info(f"Saved sync map to {sync_map_path}")
-    logging.info(f"Processing complete. Outputs saved to {output_dir}")
-
-def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
-    audio_path = Path(audio_path)
-    output_base_name = audio_path.stem
-    output_dir = Path(output_dir)
-    text_path = audio_path.with_suffix(".txt")
-
-    if (output_dir / f"{output_base_name}_sync_map.json").exists():
-        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
-        return
-
-    logging.info(f"Generating text and sync map directly from audio for {audio_path.name}...")
-    
-    # Use chunked transcription here too
-    raw_segments, duration = transcribe_chunked(model, str(audio_path))
-
-    sync_map = {}
-    word_level_data = []
-    full_text_segments = []
-    ground_truth_segments = []
-
-    for i, seg in enumerate(raw_segments):
-        seg_id = f"p{i+1}"
-        sync_map[seg_id] = {
-            "start": seg["start"],
-            "end": seg["end"]
-        }
-        
-        clean_text = " ".join(seg["text"].split())
-        if clean_text:
-            full_text_segments.append(seg["text"])
-            ground_truth_segments.append({
-                "id": seg_id,
-                "text": clean_text
-            })
-        
-        if seg.get("words"):
-            word_level_data.extend(seg["words"])
-
-    # Save all files
-    with open(output_dir / f"{output_base_name}_sync_map.json", "w", encoding="utf-8") as f:
-        json.dump(sync_map, f, indent=4)
-    
-    with open(output_dir / f"{output_base_name}_transcribed_words.json", "w") as f:
-        json.dump(word_level_data, f, indent=4)
-        
-    with open(output_dir / f"{output_base_name}_segments.json", "w", encoding="utf-8") as f:
-        json.dump(ground_truth_segments, f, indent=4)
-
-    with open(text_path, "w", encoding="utf-8") as f:
-        f.write(" ".join(full_text_segments))
-
-    gc.collect()
-    torch.cuda.empty_cache()
-
-def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-1):
+def needleman_wunsch(seq1: List[str], seq2: List[Dict[str, Any]], match_score=1, mismatch_score=-1, gap_penalty=-1) -> List[Tuple[Optional[str], Optional[Dict[str, Any]]]]:
     """
-    Memory Optimized Needleman-Wunsch (Int16)
+    Memory Optimized Needleman-Wunsch algorithm using Int16 for score matrix.
+    Aligns a list of strings (seq1) with a list of word dictionaries (seq2).
     """
-    # 1. Pre-process strings
+    # 1. Pre-process strings for comparison
     seq1_cleaned = [word.lower().strip(".,!?\"'") for word in seq1]
     seq2_cleaned = [word['word'].lower().strip(".,!?\"'") for word in seq2]
 
     n = len(seq1)
     m = len(seq2)
     
-    # 2. Memory Optimization: Use int16 instead of float64
-    # This reduces memory footprint by 4x.
-    # We use int16 because alignment scores for paragraphs won't overflow 32,767.
+    # 2. Memory Optimization: Use int16 instead of float64/int64
     score = np.zeros((n + 1, m + 1), dtype=np.int16)
 
     # Initialization
-    # Use arange for faster vector initialization
     score[:, 0] = np.arange(n + 1) * gap_penalty
     score[0, :] = np.arange(m + 1) * gap_penalty
 
     # Fill table
-    # Loop is unavoidable in standard python NW, but reduced dtype speeds up memory access
     for i in range(1, n + 1):
         for j in range(1, m + 1):
             match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
             
-            # Calculate candidates
             match = score[i - 1, j - 1] + match_val
             delete = score[i - 1, j] + gap_penalty
             insert = score[i, j - 1] + gap_penalty
             
-            # Manual max (slightly faster than np.max for scalars)
+            # Manual max
             if match >= delete and match >= insert:
                 score[i, j] = match
             elif delete >= insert:
@@ -415,9 +246,8 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
     while i > 0 and j > 0:
         score_current = score[i][j]
         score_diagonal = score[i - 1][j - 1]
-        score_up = score[i][j - 1]
         score_left = score[i - 1][j]
-
+        
         match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
         
         if score_current == score_diagonal + match_val:
@@ -445,6 +275,175 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         
     return list(zip(reversed(align1), reversed(align2)))
 
+def save_sync_outputs(output_dir: Path, base_name: str, sync_map: Dict, word_data: List[Dict], segments: List[Dict], text_content: Optional[str] = None):
+    """Helper to save all output JSON files."""
+    
+    with open(output_dir / f"{base_name}_sync_map.json", "w", encoding="utf-8") as f:
+        json.dump(sync_map, f, indent=4)
+        
+    with open(output_dir / f"{base_name}_transcribed_words.json", "w") as f:
+        json.dump(word_data, f, indent=4) # No utf-8 needed usually for pure ascii, but safe to default
+        
+    with open(output_dir / f"{base_name}_segments.json", "w", encoding="utf-8") as f:
+        json.dump(segments, f, indent=4)
+
+    if text_content:
+        with open(output_dir / f"{base_name}.txt", "w", encoding="utf-8") as f:
+            f.write(text_content)
+            
+    logging.info(f"Saved outputs to {output_dir}")
+
+def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
+    """
+    Process an audiobook with existing ground-truth text.
+    Transcribes audio, segments text, and aligns them.
+    """
+    audio_path = Path(audio_path)
+    output_base_name = audio_path.stem
+    output_dir = Path(output_dir)
+
+    sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
+    if sync_map_path.exists():
+        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
+        return
+
+    # 1. Transcribe
+    logging.info("Step 1/3: Transcribing audio...")
+    raw_segments, _ = transcribe_audio_stream(model, str(audio_path))
+    
+    word_level_data = []
+    for seg in raw_segments:
+        if seg.get("words"):
+            word_level_data.extend(seg["words"])
+
+    # 2. Process Ground Truth
+    logging.info("Step 2/3: Processing ground-truth text...")
+    with open(text_path, "r", encoding="utf-8") as f:
+        ground_truth_text = f.read()
+    
+    ground_truth_segments = []
+    raw_paragraphs = ground_truth_text.split('\n\n')
+    
+    p_counter = 1
+    for p_text in raw_paragraphs:
+        cleaned = " ".join(p_text.split())
+        if not cleaned: continue
+        
+        words_in_p = cleaned.split()
+        if len(words_in_p) > 300:
+            # Simple sentence split for large paragraphs
+            sentences = cleaned.replace('. ', '.\n').replace('? ', '?\n').replace('! ', '!\n').split('\n')
+            for s in sentences:
+                if s.strip():
+                    ground_truth_segments.append({"id": f"p{p_counter}", "text": s.strip()})
+                    p_counter += 1
+        else:
+            ground_truth_segments.append({"id": f"p{p_counter}", "text": cleaned})
+            p_counter += 1
+
+    # 3. Align
+    logging.info("Step 3/3: Aligning...")
+    sync_map = {}
+    transcribed_word_cursor = 0
+    
+    # Constants for Windowed Search
+    SEARCH_WINDOW_MULTIPLIER = 3
+    MIN_SEARCH_WINDOW = 100
+    MAX_SEARCH_WINDOW = 2000 
+
+    for segment in tqdm(ground_truth_segments, desc="Aligning segments"):
+        segment_words = segment['text'].split()
+        if not segment_words:
+            continue
+
+        start_pos = transcribed_word_cursor
+        window_size = max(len(segment_words) * SEARCH_WINDOW_MULTIPLIER, MIN_SEARCH_WINDOW)
+        window_size = min(window_size, MAX_SEARCH_WINDOW) 
+        
+        end_pos = min(start_pos + window_size, len(word_level_data))
+        search_window = word_level_data[start_pos:end_pos]
+        
+        if not search_window:
+            break
+
+        alignment = needleman_wunsch(segment_words, search_window)
+
+        start_time, end_time = None, None
+        last_matched_idx = -1
+        
+        window_ids = [id(w) for w in search_window]
+
+        for gt_word, whisper_word in alignment:
+            if gt_word is not None and whisper_word is not None:
+                if start_time is None:
+                    start_time = whisper_word["start"]
+                end_time = whisper_word["end"]
+                
+                try:
+                    idx = window_ids.index(id(whisper_word))
+                    last_matched_idx = idx
+                except ValueError:
+                    pass
+
+        if start_time is not None and end_time is not None:
+            sync_map[segment["id"]] = {"start": start_time, "end": end_time}
+            if last_matched_idx != -1:
+                transcribed_word_cursor = start_pos + last_matched_idx + 1
+        else:
+            transcribed_word_cursor += len(segment_words)
+
+    # Save
+    save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, ground_truth_segments)
+
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
+    """
+    Generate sync map directly from audio transcription (no ground truth).
+    """
+    audio_path = Path(audio_path)
+    output_base_name = audio_path.stem
+    output_dir = Path(output_dir)
+
+    if (output_dir / f"{output_base_name}_sync_map.json").exists():
+        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
+        return
+
+    logging.info(f"Generating full transcription for {audio_path.name}...")
+    
+    try:
+        raw_segments, _ = transcribe_audio_stream(model, str(audio_path))
+    except Exception as e:
+        logging.error(f"Failed to transcribe {audio_path}: {e}")
+        return
+
+    sync_map = {}
+    word_level_data = []
+    full_text_segments = []
+    ground_truth_segments = []
+
+    for i, seg in enumerate(raw_segments):
+        seg_id = f"p{i+1}"
+        sync_map[seg_id] = {
+            "start": seg["start"],
+            "end": seg["end"]
+        }
+        
+        clean_text = " ".join(seg["text"].split())
+        if clean_text:
+            full_text_segments.append(seg["text"])
+            ground_truth_segments.append({
+                "id": seg_id,
+                "text": clean_text
+            })
+        
+        if seg.get("words"):
+            word_level_data.extend(seg["words"])
+
+    full_text = " ".join(full_text_segments)
+    save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, ground_truth_segments, full_text)
+
+    gc.collect()
+    torch.cuda.empty_cache()
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
     parser.add_argument("--data-dir", type=str, default="data", help="Directory containing audio and text files.")
@@ -463,19 +462,22 @@ if __name__ == "__main__":
         device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
         logging.info(f"Loading Whisper model '{args.model_size}' on {device}...")
         
-        model = WhisperModel(args.model_size, device=device, compute_type=args.compute_type)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            model = WhisperModel(args.model_size, device=device, compute_type=args.compute_type)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        audio_files = list(data_dir.glob("*.mp3"))
-        if not audio_files:
-            logging.warning(f"No .mp3 files found in {data_dir}.")
-        else:
-            logging.info(f"Found {len(audio_files)} MP3 file(s).")
-            for audio_file in audio_files:
-                logging.info(f"--- Processing: {audio_file.name} ---")
-                text_file = audio_file.with_suffix(".txt")
+            audio_files = list(data_dir.glob("*.mp3"))
+            if not audio_files:
+                logging.warning(f"No .mp3 files found in {data_dir}.")
+            else:
+                logging.info(f"Found {len(audio_files)} MP3 file(s).")
+                for audio_file in audio_files:
+                    logging.info(f"--- Processing: {audio_file.name} ---")
+                    text_file = audio_file.with_suffix(".txt")
 
-                if text_file.exists():
-                    process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
-                else:
-                    create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+                    if text_file.exists():
+                        process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
+                    else:
+                        create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+        except Exception as e:
+            logging.critical(f"Fatal error initializing model or processing: {e}")

@@ -109,8 +109,9 @@ The synchronization process is the core feature of the application, and its accu
         ```
 
 2.  **Transcription with Word-Level Timestamps**:
-    *   The audiobook file is loaded and processed by a `faster-whisper` model (`WhisperModel`).
-    *   The model's `transcribe` method is called with `word_timestamps=True`. This generates a highly accurate transcription of the audio with precise `start` and `end` timestamps for every word.
+    *   **Memory-Efficient Streaming**: The `Sync Service` avoids loading the entire audio file into memory (which can cause crashes with large audiobooks). Instead, it uses `ffmpeg` to stream the audio in small chunks (e.g., 1 hour) directly from the disk.
+    *   **Pipeline Architecture**: A **Producer-Consumer** pattern is implemented using threading. A background thread prefetches the next audio chunk while the current chunk is being processed, ensuring maximum GPU utilization and zero downtime.
+    *   The model's `transcribe` method is called on each chunk with `word_timestamps=True`. This generates a highly accurate transcription of the audio with precise `start` and `end` timestamps for every word.
     *   Example of `faster-whisper` word-level output (`transcribed_words.json`):
         ```json
         [
@@ -164,7 +165,7 @@ This detailed, multi-step process leverages the power of `faster-whisper` for ac
     *   **Cache**: Redis for caching session data and frequently accessed content.
 *   **Storage**: AWS S3 or Google Cloud Storage for storing media files.
 *   **Synchronization Service**:
-    *   **Transcription and Alignment Engine**: The application will use **`faster-whisper`**. It is a reimplementation of OpenAI's Whisper model that is up to 4 times faster and uses less memory, while providing highly accurate word-level timestamps. It will be self-hosted and integrated directly into the `Sync Service`.
+    *   **Transcription and Alignment Engine**: The application uses **`faster-whisper`** (providing 4x speedup over OpenAI's Whisper) combined with `ffmpeg` for memory-safe audio streaming. The alignment is handled by a custom memory-optimized Needleman-Wunsch implementation.
 *   **DevOps**: Docker, Kubernetes, GitHub Actions for CI/CD.
 
 ## 9. Challenges

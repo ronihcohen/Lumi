@@ -1,0 +1,180 @@
+# Audiobook to Text Sync App Design
+
+## 1. Introduction
+
+This document outlines the design for an application that synchronizes audiobook playback with its corresponding text. The app will provide an immersive reading experience by highlighting the text as the audiobook plays, allowing users to read and listen simultaneously.
+
+## 2. Features
+
+*   **Audio Playback**: Standard audio player controls (play, pause, seek, volume).
+*   **Text Display**: Display the text of the book in a readable format.
+*   **Real-time Synchronization**: Highlight words, sentences, or paragraphs in the text as they are being narrated in the audiobook.
+*   **Cross-Platform Support**: The app will be available on iOS, Android, and the web.
+*   **User Accounts**: Users can create accounts to save their progress and library.
+*   **Library Management**: Users can add, remove, and organize their audiobooks.
+*   **Offline Access**: Users can download audiobooks and text for offline use.
+*   **Multi-format Support**: The app will support common audiobook (MP3, M4A, M4B) and e-book (EPUB, PDF) formats.
+
+## 3. Architecture
+
+The application will follow a client-server architecture.
+
+*   **Frontend (Client)**: A mobile application (iOS/Android) and a web application.
+*   **Backend (Server)**: A set of services to manage users, books, and synchronization data.
+*   **Database**: To store user data, book metadata, and progress.
+*   **Storage**: To store audiobook and e-book files.
+*   **Synchronization Service**: A dedicated service to process and align audio with text.
+
+```
++----------------+      +-----------------+      +----------------+
+| Mobile App     |      | Web App         |      | Admin Dashboard|
++----------------+      +-----------------+      +----------------+
+        |                      |                      |
+        +----------------------+----------------------+
+                               |
+                       +-------v-------+
+                       | API Gateway   |
+                       +---------------+
+                               |
+        +----------------------+----------------------+
+        |                      |                      |
++-------v--------+    +--------v-------+    +---------v------+
+| User Service   |    | Book Service   |    | Sync Service   |
++----------------+    +----------------+    +----------------+
+        |                      |                      |
++-------v--------+    +--------v-------+    +---------v------+
+| Database       |    | Object Storage |    | Caching        |
+| (PostgreSQL)   |    | (S3, GCS)      |    | (Redis)        |
++----------------+    +----------------+    +----------------+
+```
+
+## 4. Data Models
+
+### User
+-   `user_id` (PK)
+-   `username`
+-   `email`
+-   `password_hash`
+-   `created_at`
+
+### Book
+-   `book_id` (PK)
+-   `title`
+-   `author`
+-   `cover_image_url`
+-   `audio_file_url`
+-   `text_file_url`
+-   `sync_data_url` (JSON file with timestamps)
+-   `uploaded_by` (FK to User)
+-   `created_at`
+
+### UserBookProgress
+-   `progress_id` (PK)
+-   `user_id` (FK to User)
+-   `book_id` (FK to Book)
+-   `current_position_seconds`
+-   `last_updated`
+
+## 5. API Design
+
+### Authentication
+-   `POST /api/auth/register`
+-   `POST /api/auth/login`
+-   `POST /api/auth/logout`
+
+### Books
+-   `GET /api/books`: Get a list of all books.
+-   `GET /api/books/{book_id}`: Get details for a specific book.
+-   `POST /api/books`: Upload a new book (audio + text).
+-   `DELETE /api/books/{book_id}`: Delete a book.
+
+### Progress
+-   `GET /api/progress/{book_id}`: Get user's progress for a book.
+-   `POST /api/progress/{book_id}`: Update user's progress.
+
+## 6. Synchronization Implementation Details
+
+The synchronization process is the core feature of the application, and its accuracy is critical for a good user experience. The `Sync Service` will use **WhisperX** (validated against v3.7.4 or newer) to generate highly precise word-level timestamps. The entire process is automated and broken down into the following pipeline:
+
+1.  **File Upload and Pre-processing**:
+    *   The user uploads an audiobook file (e.g., `book.mp3`) and a text file (e.g., `book.epub`).
+    *   The `Sync Service` first converts the e-book into a clean, plain text format.
+    *   The plain text is then segmented into a structured list of sentences or paragraphs, each with a unique ID. This is the **ground-truth text**.
+    *   Example of segmented ground-truth text (`segments.json`):
+        ```json
+        [
+          { "id": "p1", "text": "The quick brown fox jumps over the lazy dog." },
+          { "id": "p2", "text": "This is the second sentence." }
+        ]
+        ```
+
+2.  **Step 1: High-Performance Transcription (WhisperX)**:
+    *   The audiobook file is loaded and processed by a Whisper model within WhisperX (`whisperx.load_model`, `model.transcribe`).
+    *   This step generates a highly accurate transcription of the audio with initial segment-level timestamps.
+
+3.  **Step 2: Word-Level Forced Alignment (WhisperX)**:
+    *   The transcribed segments from the previous step are then passed to WhisperX's alignment model (`whisperx.load_align_model`, `whisperx.align`).
+    *   This performs a forced alignment to produce precise `start` and `end` timestamps for every single word in the *transcribed* text.
+    *   Example of WhisperX word-level output (`transcribed_words.json`):
+        ```json
+        [
+            {"word": "The", "start": 0.12, "end": 0.34},
+            {"word": "quick", "start": 0.35, "end": 0.67},
+            {"word": "brown", "start": 0.68, "end": 0.95, "score": 0.98},
+            // ... and so on for every transcribed word
+        ]
+        ```
+
+4.  **Step 3: Mapping Timestamps to Ground-Truth Text**:
+    *   This is a crucial step to bridge the gap between the transcribed text and the original book text. Minor differences (e.g., punctuation, narrator ad-libs) are expected.
+    *   A text alignment algorithm (e.g., a sequence alignment algorithm like Needleman-Wunsch) will be used to map the words from the **ground-truth text** to the timestamped words from the **WhisperX transcription**.
+    *   This creates a definitive link between the original book content and the audio timing.
+
+5.  **Step 4: Final Sync Map Generation**:
+    *   Using the mapping from the previous step, the `Sync Service` generates the final `sync.json` file.
+    *   For each segment in the ground-truth text (e.g., paragraph `p1`), the service finds the `start` time of its first mapped word and the `end` time of its last mapped word from the WhisperX output.
+    *   Example of the final `sync.json`:
+        ```json
+        {
+          "p1": { "start": 0.12, "end": 2.51 },
+          "p2": { "start": 2.63, "end": 4.25 }
+        }
+        ```
+
+6.  **Client-side Implementation**:
+    *   When a user plays an audiobook, the client application fetches the audio file, the segmented ground-truth text (`segments.json`), and the final synchronization map (`sync.json`).
+    *   As the audio plays, the application monitors the `currentTime` of the audio player.
+    *   It uses this `currentTime` to look up which segment should be active by finding the segment in `sync.json` where `currentTime` is between `start` and `end`.
+    *   The application then applies a highlight to the corresponding text segment on the screen.
+
+This detailed, multi-step process leverages the power of WhisperX for accurate timestamp generation and ensures that the final synchronization is correctly mapped to the original source text.
+
+## 7. UI/UX
+
+*   **Library View**: A grid or list of book covers that the user has added.
+*   **Player View**:
+    *   Audio player controls at the bottom.
+    *   The book text displayed in a scrollable view.
+    *   The currently playing sentence/paragraph will be highlighted.
+    *   Tapping on a paragraph could seek the audio to that point.
+
+## 8. Technology Stack
+
+*   **Frontend**:
+    *   **Mobile**: React Native or Flutter for cross-platform development.
+    *   **Web**: React or Vue.js.
+*   **Backend**:
+    *   **Framework**: Node.js (Express), Python (Django/Flask), or Go.
+    *   **Database**: PostgreSQL or MongoDB.
+    *   **Cache**: Redis for caching session data and frequently accessed content.
+*   **Storage**: AWS S3 or Google Cloud Storage for storing media files.
+*   **Synchronization Service**:
+    *   **Forced Alignment Engine**: The application will use **WhisperX**. It is a popular and highly accurate forced alignment engine that leverages the Whisper ASR model. Its accuracy at the word level makes it an excellent choice for creating a precise and reliable synchronization experience. It will be self-hosted and integrated directly into the `Sync Service`.
+*   **DevOps**: Docker, Kubernetes, GitHub Actions for CI/CD.
+
+## 9. Challenges
+
+*   **Synchronization Accuracy**: The accuracy of the forced alignment engine is crucial. Inaccurate timestamps will lead to a poor user experience. Manual correction tools might be needed for publishers, especially for audio with background noise or unusual narration.
+*   **Format Compatibility**: Handling various e-book and audiobook formats can be complex. A robust processing pipeline will be required to convert them to a standard format.
+*   **Scalability**: The application needs to be able to handle a large number of users and books. This requires a scalable architecture for both the backend services and the media storage.
+*   **Copyright and DRM**: The app must respect digital rights management (DRM) and copyright laws. This may involve integrating with third-party DRM solutions.

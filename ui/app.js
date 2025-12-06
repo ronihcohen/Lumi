@@ -1,16 +1,16 @@
 
 document.addEventListener('DOMContentLoaded', async () => {
     const audioPlayer = document.getElementById('audio-player');
+    const audioSource = document.getElementById('audio-source');
     const bookContent = document.getElementById('book-content');
+    const bookSelector = document.getElementById('book-selector');
 
     let wordsData = [];
     let syncMap = {};
-    let sortedParagraphs = []; // Array of {id, start, end}
+    let sortedParagraphs = [];
     let currentChunkIndex = -1;
-    const CHUNK_SIZE = 50; // Number of paragraphs per chunk
-
-    // Force audio to start loading
-    audioPlayer.load();
+    let currentBook = null;
+    const CHUNK_SIZE = 50;
 
     // Font size controls
     const increaseFontBtn = document.getElementById('increase-font');
@@ -19,7 +19,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const MIN_FONT_SIZE = 12;
     const MAX_FONT_SIZE = 48;
 
-    // Load saved font size
     let currentFontSize = parseInt(localStorage.getItem(FONT_SIZE_KEY)) || 18;
     applyFontSize(currentFontSize);
 
@@ -43,57 +42,108 @@ document.addEventListener('DOMContentLoaded', async () => {
         bookContent.style.fontSize = size + 'px';
     }
 
+    // Load available books
     try {
-        console.log("Fetching data...");
-        const [wordsResponse, syncResponse] = await Promise.all([
-            fetch('data/The Fellowship of the Ring Lord of the Rings, Book 1_transcribed_words.json'),
-            fetch('data/The Fellowship of the Ring Lord of the Rings, Book 1_sync_map.json')
-        ]);
+        const booksResponse = await fetch('/api/books');
+        const books = await booksResponse.json();
 
-        wordsData = await wordsResponse.json();
-        syncMap = await syncResponse.json();
-        console.log("Data loaded. Words:", wordsData.length);
+        bookSelector.innerHTML = '';
+        if (books.length === 0) {
+            bookSelector.innerHTML = '<option value="">No books found</option>';
+            bookContent.innerHTML = '<p style="color: red">No books found in data folder</p>';
+            return;
+        }
 
-        // Pre-process paragraphs
-        const pIds = Object.keys(syncMap).sort((a, b) => {
-            const numA = parseInt(a.slice(1));
-            const numB = parseInt(b.slice(1));
-            return numA - numB;
+        // Get last selected book or use first one
+        const lastBook = localStorage.getItem('lumi_selected_book');
+        let selectedBook = books.includes(lastBook) ? lastBook : books[0];
+
+        books.forEach(book => {
+            const option = document.createElement('option');
+            option.value = book;
+            option.textContent = book;
+            option.selected = book === selectedBook;
+            bookSelector.appendChild(option);
         });
 
-        sortedParagraphs = pIds.map(id => ({
-            id: id,
-            start: syncMap[id].start,
-            end: syncMap[id].end
-        }));
-
-        // Initial setup
-        setupSync();
-
-        // Event Delegation for click (seek)
-        bookContent.addEventListener('click', (e) => {
-            if (e.target.classList.contains('word')) {
-                const rawStart = e.target.getAttribute('data-start');
-                const start = parseFloat(rawStart);
-
-                if (!isNaN(start)) {
-                    const doSeek = () => {
-                        audioPlayer.currentTime = start;
-                        audioPlayer.play().catch(err => console.error("Play failed:", err));
-                    };
-
-                    if (audioPlayer.seekable.length > 0) {
-                        doSeek();
-                    } else {
-                        audioPlayer.addEventListener('canplay', doSeek, { once: true });
-                    }
-                }
+        // Handle book selection change
+        bookSelector.addEventListener('change', () => {
+            const newBook = bookSelector.value;
+            if (newBook && newBook !== currentBook) {
+                localStorage.setItem('lumi_selected_book', newBook);
+                loadBook(newBook);
             }
         });
 
+        // Load initial book
+        await loadBook(selectedBook);
+
     } catch (error) {
-        console.error('Error loading data:', error);
-        bookContent.innerHTML = `<p style="color: red">Error loading book data: ${error.message}</p>`;
+        console.error('Error loading books:', error);
+        bookContent.innerHTML = `<p style="color: red">Error loading books: ${error.message}</p>`;
+    }
+
+    async function loadBook(bookName) {
+        try {
+            console.log("Loading book:", bookName);
+            currentBook = bookName;
+
+            // Update audio source
+            audioSource.src = `data/${encodeURIComponent(bookName)}.mp3`;
+            audioPlayer.load();
+
+            // Fetch book data
+            const [wordsResponse, syncResponse] = await Promise.all([
+                fetch(`data/${encodeURIComponent(bookName)}_transcribed_words.json`),
+                fetch(`data/${encodeURIComponent(bookName)}_sync_map.json`)
+            ]);
+
+            wordsData = await wordsResponse.json();
+            syncMap = await syncResponse.json();
+            console.log("Data loaded. Words:", wordsData.length);
+
+            // Pre-process paragraphs
+            const pIds = Object.keys(syncMap).sort((a, b) => {
+                const numA = parseInt(a.slice(1));
+                const numB = parseInt(b.slice(1));
+                return numA - numB;
+            });
+
+            sortedParagraphs = pIds.map(id => ({
+                id: id,
+                start: syncMap[id].start,
+                end: syncMap[id].end
+            }));
+
+            // Setup sync with book-specific storage key
+            setupSync();
+
+            // Event Delegation for word clicks
+            bookContent.removeEventListener('click', handleWordClick);
+            bookContent.addEventListener('click', handleWordClick);
+
+        } catch (error) {
+            console.error('Error loading book:', error);
+            bookContent.innerHTML = `<p style="color: red">Error loading book data: ${error.message}</p>`;
+        }
+    }
+
+    function handleWordClick(e) {
+        if (e.target.classList.contains('word')) {
+            const start = parseFloat(e.target.getAttribute('data-start'));
+            if (!isNaN(start)) {
+                const doSeek = () => {
+                    audioPlayer.currentTime = start;
+                    audioPlayer.play().catch(err => console.error("Play failed:", err));
+                };
+
+                if (audioPlayer.seekable.length > 0) {
+                    doSeek();
+                } else {
+                    audioPlayer.addEventListener('canplay', doSeek, { once: true });
+                }
+            }
+        }
     }
 
     function renderChunk(chunkIndex) {
@@ -104,7 +154,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const startIndex = chunkIndex * CHUNK_SIZE;
         const endIndex = Math.min((chunkIndex + 1) * CHUNK_SIZE, sortedParagraphs.length);
-
         const chunkParagraphs = sortedParagraphs.slice(startIndex, endIndex);
         const fragment = document.createDocumentFragment();
 
@@ -133,8 +182,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         bookContent.appendChild(fragment);
         currentChunkIndex = chunkIndex;
-
-        // Reapply font size after rendering
         applyFontSize(currentFontSize);
     }
 
@@ -164,10 +211,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function setupSync() {
-        const STORAGE_KEY = 'lumi_last_time';
+        // Book-specific storage key
+        const STORAGE_KEY = `lumi_${currentBook}_last_time`;
         let lastSaveTime = 0;
 
-        // Resume & Initial Render
         const savedTime = parseFloat(localStorage.getItem(STORAGE_KEY));
         let initialTime = (!isNaN(savedTime) && isFinite(savedTime)) ? savedTime : 0;
 
@@ -195,7 +242,6 @@ document.addEventListener('DOMContentLoaded', async () => {
                 renderChunk(targetChunk);
             }
 
-            // Search the DOM elements directly (not the full data array)
             const wordSpans = document.getElementsByClassName('word');
             let found = -1;
             let low = 0, high = wordSpans.length - 1;
@@ -222,14 +268,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 const activeSpan = wordSpans[found];
                 activeSpan.classList.add('active-word');
-
-                // Always keep highlighted word centered
                 activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
 
+        audioPlayer.removeEventListener('timeupdate', updateHighlight);
+        audioPlayer.removeEventListener('seeked', updateHighlight);
+        audioPlayer.removeEventListener('pause', savePausePosition);
+
+        function savePausePosition() {
+            localStorage.setItem(STORAGE_KEY, audioPlayer.currentTime);
+        }
+
         audioPlayer.addEventListener('timeupdate', updateHighlight);
         audioPlayer.addEventListener('seeked', updateHighlight);
-        audioPlayer.addEventListener('pause', () => localStorage.setItem(STORAGE_KEY, audioPlayer.currentTime));
+        audioPlayer.addEventListener('pause', savePausePosition);
     }
 });

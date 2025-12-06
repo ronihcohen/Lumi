@@ -79,6 +79,16 @@
             color: #666;
         }
 
+        #book-selector {
+            flex: 1;
+            padding: 4px 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
         .font-btn {
             background: #f0f0f0;
             border: 1px solid #ddd;
@@ -113,13 +123,15 @@
 
     <div id="player-container">
         <div class="font-size-controls">
-            <span>Font size:</span>
+            <select id="book-selector">
+                <option value="">Loading books...</option>
+            </select>
+            <span>Size:</span>
             <button class="font-btn" id="decrease-font" aria-label="Decrease font size">−</button>
             <button class="font-btn" id="increase-font" aria-label="Increase font size">+</button>
         </div>
         <audio id="audio-player" controls preload="metadata">
-            <source src="data/The%20Fellowship%20of%20the%20Ring%20Lord%20of%20the%20Rings,%20Book%201.mp3"
-                type="audio/mpeg">
+            <source id="audio-source" src="" type="audio/mpeg">
             Your browser does not support the audio element.
         </audio>
     </div>

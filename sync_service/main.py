@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str, transcription_result=None):
+def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
     Processes an audiobook and its text to generate a synchronization map.
 
@@ -16,7 +16,6 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         audio_path (str): Path to the audiobook file.
         text_path (str): Path to the text file.
         output_dir (str): Directory to save the output files.
-        transcription_result (tuple, optional): Pre-computed transcription result containing segments and info. Defaults to None.
     """
     audio_path = Path(audio_path)
     output_base_name = audio_path.stem
@@ -28,13 +27,9 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         print(f"Output for {audio_path.name} already exists. Skipping.")
         return
 
-    # 1. Transcribe the audio if not already provided
-    if transcription_result:
-        print("Using pre-transcribed data.")
-        segments, info = transcription_result
-    else:
-        print("Transcribing audio with word-level timestamps...")
-        segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
+    # 1. Transcribe the audio
+    print("Transcribing audio with word-level timestamps...")
+    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
     
     # Save the transcribed words
     output_path = output_dir / f"{output_base_name}_transcribed_words.json"
@@ -149,6 +144,85 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     print(f"Processing complete. Outputs saved to {output_dir}")
 
+
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
+    """
+    Generates a sync map directly from transcription segments when no ground-truth text is provided.
+    """
+    audio_path = Path(audio_path)
+    output_base_name = audio_path.stem
+    output_dir = Path(output_dir)
+    text_path = audio_path.with_suffix(".txt")
+
+    # Check if the final sync map already exists
+    sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
+    if sync_map_path.exists():
+        print(f"Output for {audio_path.name} already exists. Skipping.")
+        return
+
+    # 1. Transcribe audio
+    print(f"Generating text and sync map directly from audio for {audio_path.name}...")
+    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
+    
+    # The segments generator needs to be realized into a list for multiple uses
+    segments_list = list(segments)
+
+    # 2. Generate sync map, word-level data, and full text from transcription
+    sync_map = {}
+    word_level_data = []
+    full_text_segments = []
+    
+    with tqdm(total=round(info.duration), desc="Processing transcription", unit='s') as pbar:
+        for i, segment in enumerate(segments_list):
+            sync_map[f"p{i+1}"] = {
+                "start": segment.start,
+                "end": segment.end
+            }
+            full_text_segments.append(segment.text)
+            for word in segment.words:
+                word_level_data.append({
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end,
+                    "score": word.probability
+                })
+            pbar.update(round(segment.end) - pbar.n)
+        pbar.update(pbar.total - pbar.n)
+
+    # 3. Save all the generated files
+    # Save sync map
+    with open(sync_map_path, "w", encoding="utf-8") as f:
+        json.dump(sync_map, f, indent=4)
+
+    # Save transcribed words
+    words_path = output_dir / f"{output_base_name}_transcribed_words.json"
+    with open(words_path, "w") as f:
+        json.dump(word_level_data, f, indent=4)
+
+    # Save segmented text (mimicking the structure of the other path)
+    ground_truth_segments = []
+    for i, seg_text in enumerate(full_text_segments):
+        cleaned_text = " ".join(seg_text.split())
+        if cleaned_text:
+            ground_truth_segments.append({
+                "id": f"p{i+1}",
+                "text": cleaned_text
+            })
+    segments_path = output_dir / f"{output_base_name}_segments.json"
+    with open(segments_path, "w", encoding="utf-8") as f:
+        json.dump(ground_truth_segments, f, indent=4)
+
+    # Save full text to a new .txt file
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.write(" ".join(full_text_segments))
+    print(f"Generated text file: {text_path}")
+
+    # Clean up memory
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    print(f"Processing complete for {audio_path.name}. Outputs saved to {output_dir}")
+
 def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-2):
     """
     Performs Needleman-Wunsch alignment on two sequences.
@@ -221,11 +295,11 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         
     return list(zip(reversed(align1), reversed(align2)))
 
-def main(model, audio_path, text_path, output_dir, transcription_result=None):
+def main(model, audio_path, text_path, output_dir):
     """
     Main function to run the synchronization process.
     """
-    process_audiobook(model, audio_path, text_path, output_dir, transcription_result=transcription_result)
+    process_audiobook(model, audio_path, text_path, output_dir)
 
 if __name__ == "__main__":
     test_data_dir = Path("c:/Code/Lumi/data")
@@ -240,30 +314,17 @@ if __name__ == "__main__":
         print("Loading Whisper model with device:", device, "and compute type:", compute_type)
         model = WhisperModel("large-v2", device=device, compute_type=compute_type)
 
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True)
+
         for audio_file in test_data_dir.glob("*.mp3"):
             text_file = audio_file.with_suffix(".txt")
-            transcription_result = None
 
-            if not text_file.exists():
-                print(f"Text file not found for {audio_file.name}. Generating text from audio...")
-                segments, info = model.transcribe(str(audio_file), word_timestamps=True, vad_filter=True)
-                
-                # The segments generator needs to be realized into a list to be used multiple times.
-                segments_list = list(segments)
-                transcription_result = (segments_list, info)
+            if text_file.exists():
+                print(f"Text file found for {audio_file.name}. Processing with alignment.")
+                main(model, str(audio_file), str(text_file), str(output_dir))
+            else:
+                print(f"Text file not found for {audio_file.name}.")
+                create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
 
-                full_text = ""
-                with tqdm(total=round(info.duration), desc=f"Generating text for {audio_file.name}", unit='s') as pbar:
-                    for segment in segments_list:
-                        full_text += segment.text
-                        pbar.update(round(segment.end) - pbar.n)
-                    pbar.update(pbar.total - pbar.n)
-                
-                with open(text_file, "w", encoding="utf-8") as f:
-                    f.write(full_text)
-                print(f"Generated text file: {text_file}")
-
-            if not output_dir.exists():
-                output_dir.mkdir(parents=True)
-            main(model, str(audio_file), str(text_file), str(output_dir), transcription_result=transcription_result)
 

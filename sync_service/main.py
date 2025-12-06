@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
+import librosa
 
 def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
@@ -144,10 +145,10 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     print(f"Processing complete. Outputs saved to {output_dir}")
 
-
-def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str, chunk_duration_minutes=30):
     """
     Generates a sync map directly from transcription segments when no ground-truth text is provided.
+    Processes the audio in chunks to manage memory usage for large files.
     """
     audio_path = Path(audio_path)
     output_base_name = audio_path.stem
@@ -160,34 +161,51 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
         print(f"Output for {audio_path.name} already exists. Skipping.")
         return
 
-    # 1. Transcribe audio
     print(f"Generating text and sync map directly from audio for {audio_path.name}...")
-    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
     
-    # The segments generator needs to be realized into a list for multiple uses
-    segments_list = list(segments)
+    # Get total audio duration to process in chunks
+    total_duration_seconds = librosa.get_duration(path=str(audio_path))
+    chunk_duration_seconds = chunk_duration_minutes * 60
+    
+    all_segments = []
+    
+    with tqdm(total=total_duration_seconds, desc="Transcribing audio in chunks", unit='s') as pbar:
+        for chunk_start in range(0, int(total_duration_seconds), chunk_duration_seconds):
+            chunk_end = min(chunk_start + chunk_duration_seconds, total_duration_seconds)
+            
+            # Load a chunk of audio
+            audio_chunk, sample_rate = librosa.load(str(audio_path), sr=16000, offset=chunk_start, duration=chunk_duration_seconds)
+            
+            # Transcribe the chunk
+            segments, _ = model.transcribe(audio_chunk, word_timestamps=True, vad_filter=True)
+            
+            # Adjust timestamps to be relative to the full audio, not the chunk
+            for segment in segments:
+                for word in segment.words:
+                    word.start += chunk_start
+                    word.end += chunk_start
+                all_segments.append(segment)
+            
+            pbar.update(chunk_end - chunk_start)
 
     # 2. Generate sync map, word-level data, and full text from transcription
     sync_map = {}
     word_level_data = []
     full_text_segments = []
     
-    with tqdm(total=round(info.duration), desc="Processing transcription", unit='s') as pbar:
-        for i, segment in enumerate(segments_list):
-            sync_map[f"p{i+1}"] = {
-                "start": segment.start,
-                "end": segment.end
-            }
-            full_text_segments.append(segment.text)
-            for word in segment.words:
-                word_level_data.append({
-                    "word": word.word,
-                    "start": word.start,
-                    "end": word.end,
-                    "score": word.probability
-                })
-            pbar.update(round(segment.end) - pbar.n)
-        pbar.update(pbar.total - pbar.n)
+    for i, segment in enumerate(all_segments):
+        sync_map[f"p{i+1}"] = {
+            "start": segment.start,
+            "end": segment.end
+        }
+        full_text_segments.append(segment.text)
+        for word in segment.words:
+            word_level_data.append({
+                "word": word.word,
+                "start": word.start,
+                "end": word.end,
+                "score": word.probability
+            })
 
     # 3. Save all the generated files
     # Save sync map

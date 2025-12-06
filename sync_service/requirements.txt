@@ -2,5 +2,4 @@ faster-whisper
 torch
 numpy
 tqdm
-librosa
-soundfile
+hf-xet

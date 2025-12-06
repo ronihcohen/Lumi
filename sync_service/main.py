@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
-import librosa
 import argparse
+import logging
 
 def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
@@ -26,11 +26,11 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
     # Check if the final sync map already exists
     sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
     if sync_map_path.exists():
-        print(f"Output for {audio_path.name} already exists. Skipping.")
+        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
         return
 
     # 1. Transcribe the audio
-    print("Transcribing audio with word-level timestamps...")
+    logging.info("Step 1/3: Transcribing audio with word-level timestamps...")
     segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
     
     # Save the transcribed words
@@ -52,13 +52,14 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     with open(output_path, "w") as f:
         json.dump(word_level_data, f, indent=4)
+    logging.info(f"Saved transcribed words to {output_path}")
 
     # Clean up memory
     gc.collect()
     torch.cuda.empty_cache()
 
     # 2. Process the ground-truth text
-    print("Processing ground-truth text...")
+    logging.info("Step 2/3: Processing ground-truth text...")
     with open(text_path, "r", encoding="utf-8") as f:
         ground_truth_text = f.read()
     
@@ -78,16 +79,17 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
     ground_truth_path = output_dir / f"{output_base_name}_segments.json"
     with open(ground_truth_path, "w", encoding="utf-8") as f:
         json.dump(ground_truth_segments, f, indent=4)
+    logging.info(f"Saved ground-truth segments to {ground_truth_path}")
 
     # 3. Align and Map (Segment by Segment)
-    print("Aligning transcribed text with ground-truth text (segment by segment)...")
+    logging.info("Step 3/3: Aligning transcribed text with ground-truth text...")
 
     sync_map = {}
     transcribed_word_cursor = 0
     SEARCH_WINDOW_MULTIPLIER = 3 # Look at 3x the number of ground-truth words
     MIN_SEARCH_WINDOW = 100 # With a minimum of 100 words
 
-    for segment in tqdm(ground_truth_segments):
+    for segment in tqdm(ground_truth_segments, desc="Aligning segments"):
         segment_words = segment['text'].split()
         if not segment_words:
             continue
@@ -100,7 +102,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         search_window = word_level_data[start_pos:end_pos]
         
         if not search_window:
-            print("No more transcribed words to process. Stopping alignment.")
+            logging.warning("No more transcribed words to process. Stopping alignment.")
             break
 
         # Perform alignment on the smaller window
@@ -135,7 +137,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
             # If no alignment was found in the search window, something is wrong.
             # For now, we'll just advance the cursor by the number of words in the segment
             # as a fallback, but a more robust solution might be needed.
-            print(f"Warning: No alignment found for segment ID {segment['id']}. This may indicate a significant mismatch.")
+            logging.warning(f"No alignment found for segment ID {segment['id']}. This may indicate a significant mismatch.")
             # Fallback: advance the cursor by an estimated amount
             transcribed_word_cursor += len(segment_words)
 
@@ -143,8 +145,9 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
     # Save the final sync map
     with open(sync_map_path, "w", encoding="utf-8") as f:
         json.dump(sync_map, f, indent=4)
+    logging.info(f"Saved sync map to {sync_map_path}")
 
-    print(f"Processing complete. Outputs saved to {output_dir}")
+    logging.info(f"Processing complete. Outputs saved to {output_dir}")
 
 def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
     """
@@ -158,14 +161,16 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
     # Check if the final sync map already exists
     sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
     if sync_map_path.exists():
-        print(f"Output for {audio_path.name} already exists. Skipping.")
+        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
         return
 
-    print(f"Generating text and sync map directly from audio for {audio_path.name}...")
+    logging.info(f"Generating text and sync map directly from audio for {audio_path.name}...")
     
     # Transcribe the audio. Faster-whisper handles chunking internally for file paths.
+    logging.info("Step 1/2: Transcribing audio...")
     segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
 
+    logging.info("Step 2/2: Generating and saving outputs...")
     # 2. Generate sync map, word-level data, and full text from transcription
     sync_map = {}
     word_level_data = []
@@ -193,11 +198,13 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
     # Save sync map
     with open(sync_map_path, "w", encoding="utf-8") as f:
         json.dump(sync_map, f, indent=4)
+    logging.info(f"Saved sync map to {sync_map_path}")
 
     # Save transcribed words
     words_path = output_dir / f"{output_base_name}_transcribed_words.json"
     with open(words_path, "w") as f:
         json.dump(word_level_data, f, indent=4)
+    logging.info(f"Saved transcribed words to {words_path}")
 
     # Save segmented text (mimicking the structure of the other path)
     ground_truth_segments = []
@@ -211,17 +218,18 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
     segments_path = output_dir / f"{output_base_name}_segments.json"
     with open(segments_path, "w", encoding="utf-8") as f:
         json.dump(ground_truth_segments, f, indent=4)
+    logging.info(f"Saved text segments to {segments_path}")
 
     # Save full text to a new .txt file
     with open(text_path, "w", encoding="utf-8") as f:
         f.write(" ".join(full_text_segments))
-    print(f"Generated text file: {text_path}")
+    logging.info(f"Generated text file: {text_path}")
 
     # Clean up memory
     gc.collect()
     torch.cuda.empty_cache()
 
-    print(f"Processing complete for {audio_path.name}. Outputs saved to {output_dir}")
+    logging.info(f"Processing complete for {audio_path.name}. Outputs saved to {output_dir}")
 
 def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-2):
     """
@@ -296,10 +304,11 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
     return list(zip(reversed(align1), reversed(align2)))
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
     parser.add_argument("--data-dir", type=str, default="data", help="Directory containing audio and text files.")
     parser.add_argument("--output-dir", type=str, default="sync_service/output", help="Directory to save output files.")
-    parser.add_argument("--model-size", type=str, default="large-v2", help="Size of the Whisper model to use.")
+    parser.add_argument("--model-size", type=str, default="large-v2", help="Size of the Whisper model to use. Options: 'tiny', 'tiny.en', 'base', 'base.en', 'small', 'small.en', 'medium', 'medium.en', 'large-v1', 'large-v2', 'large-v3'.")
     parser.add_argument("--device", type=str, default=None, help="Device to use for computation ('cuda' or 'cpu'). Auto-detects if not specified.")
     parser.add_argument("--compute-type", type=str, default="int8_float16", help="Compute type for the model. Examples: 'int8_float16', 'float16', 'int8'.")
     args = parser.parse_args()
@@ -308,24 +317,31 @@ if __name__ == "__main__":
     output_dir = Path(args.output_dir)
 
     if not data_dir.exists():
-        print(f"Error: Data directory not found at '{data_dir}'")
+        logging.error(f"Data directory not found at '{data_dir}'")
     else:
         device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
         compute_type = args.compute_type
         
-        print(f"Loading Whisper model '{args.model_size}' with device: {device} and compute type: {compute_type}")
+        logging.info(f"Loading Whisper model '{args.model_size}' with device: {device} and compute type: {compute_type}")
         model = WhisperModel(args.model_size, device=device, compute_type=compute_type)
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        for audio_file in data_dir.glob("*.mp3"):
-            text_file = audio_file.with_suffix(".txt")
+        audio_files = list(data_dir.glob("*.mp3"))
+        if not audio_files:
+            logging.warning(f"No .mp3 files found in {data_dir}.")
+        else:
+            logging.info(f"Found {len(audio_files)} MP3 file(s) to process.")
 
-            if text_file.exists():
-                print(f"Text file found for {audio_file.name}. Processing with alignment.")
-                process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
-            else:
-                print(f"Text file not found for {audio_file.name}.")
-                create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+            for audio_file in audio_files:
+                logging.info(f"--- Processing file: {audio_file.name} ---")
+                text_file = audio_file.with_suffix(".txt")
+
+                if text_file.exists():
+                    logging.info(f"Text file found. Processing with alignment.")
+                    process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
+                else:
+                    logging.warning(f"Text file not found. Generating text from audio.")
+                    create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
 
 

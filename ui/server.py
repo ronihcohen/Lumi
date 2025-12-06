@@ -5,7 +5,8 @@ import os
 import json
 
 PORT = 8000
-DIRECTORY = "ui"
+# Serve files from the directory containing this script
+DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 DATA_DIRECTORY = "data"
 
 class Handler(http.server.SimpleHTTPRequestHandler):

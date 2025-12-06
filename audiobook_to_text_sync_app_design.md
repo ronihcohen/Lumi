@@ -108,9 +108,9 @@ The synchronization process is the core feature of the application, and its accu
         ]
         ```
 
-2.  **Step 1: Transcription with Word-Level Timestamps (faster-whisper)**:
+2.  **Transcription with Word-Level Timestamps**:
     *   The audiobook file is loaded and processed by a `faster-whisper` model (`WhisperModel`).
-    *   The model's `transcribe` method is called with `word_timestamps=True`. This single step generates a highly accurate transcription of the audio with precise `start` and `end` timestamps for every single word.
+    *   The model's `transcribe` method is called with `word_timestamps=True`. This generates a highly accurate transcription of the audio with precise `start` and `end` timestamps for every word.
     *   Example of `faster-whisper` word-level output (`transcribed_words.json`):
         ```json
         [
@@ -121,14 +121,13 @@ The synchronization process is the core feature of the application, and its accu
         ]
         ```
 
-3.  **Step 2: Mapping Timestamps to Ground-Truth Text**:
-    *   This is a crucial step to bridge the gap between the transcribed text and the original book text. Minor differences (e.g., punctuation, narrator ad-libs) are expected.
-    *   A text alignment algorithm (**Needleman-Wunsch**, implemented within the service) is used to map the words from the **ground-truth text** to the timestamped words from the **`faster-whisper` transcription**.
-    *   This creates a definitive link between the original book content and the audio timing.
-
-4.  **Step 3: Final Sync Map Generation**:
-    *   Using the mapping from the previous step, the `Sync Service` generates the final `sync_map.json` file.
-    *   For each segment in the ground-truth text (e.g., paragraph `p1`), the service finds the `start` time of its first mapped word and the `end` time of its last mapped word from the transcription output.
+3.  **Alignment and Sync Map Generation**:
+    *   To efficiently map the ground-truth text to the transcription, the alignment is done segment by segment.
+    *   For each ground-truth segment (e.g., a paragraph), a **search window** is defined in the transcribed word list. This window is typically larger than the segment itself (e.g., 3 times the number of words) to account for discrepancies.
+    *   A text alignment algorithm (**Needleman-Wunsch**) is then used to find the best match between the ground-truth segment's words and the words within the search window of the transcription.
+    *   Once the alignment is found, the `start` timestamp of the first matched word and the `end` timestamp of the last matched word in the window are extracted.
+    *   This process is repeated for all segments, and a cursor is maintained to keep track of the position in the transcribed word list, ensuring each segment is processed sequentially.
+    *   The final output is the `sync_map.json` file, which maps each segment ID to its corresponding start and end times.
     *   Example of the final `sync_map.json`:
         ```json
         {
@@ -137,13 +136,13 @@ The synchronization process is the core feature of the application, and its accu
         }
         ```
 
-5.  **Client-side Implementation**:
+4.  **Client-side Implementation**:
     *   When a user plays an audiobook, the client application fetches the audio file, the segmented ground-truth text (`segments.json`), and the final synchronization map (`sync_map.json`).
     *   As the audio plays, the application monitors the `currentTime` of the audio player.
     *   It uses this `currentTime` to look up which segment should be active by finding the segment in `sync_map.json` where `currentTime` is between `start` and `end`.
     *   The application then applies a highlight to the corresponding text segment on the screen.
 
-This detailed, multi-step process leverages the power of `faster-whisper` for accurate timestamp generation and ensures that the final synchronization is correctly mapped to the original source text.
+This detailed, multi-step process leverages the power of `faster-whisper` for accurate timestamp generation and a windowed Needleman-Wunsch algorithm for efficient and accurate alignment.
 
 ## 7. UI/UX
 

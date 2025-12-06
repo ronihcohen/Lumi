@@ -174,3 +174,6 @@ This detailed, multi-step process leverages the power of `faster-whisper` for ac
 *   **Format Compatibility**: Handling various e-book and audiobook formats can be complex. A robust processing pipeline will be required to convert them to a standard format.
 *   **Scalability**: The application needs to be able to handle a large number of users and books. This requires a scalable architecture for both the backend services and the media storage.
 *   **Copyright and DRM**: The app must respect digital rights management (DRM) and copyright laws. This may involve integrating with third-party DRM solutions.
+
+
+python sync_service\main.py --model-size tiny 

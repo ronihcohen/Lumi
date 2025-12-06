@@ -1,5 +1,4 @@
 
-
 document.addEventListener('DOMContentLoaded', async () => {
     const audioPlayer = document.getElementById('audio-player');
     const bookContent = document.getElementById('book-content');
@@ -12,6 +11,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Force audio to start loading
     audioPlayer.load();
+
+    // Font size controls
+    const increaseFontBtn = document.getElementById('increase-font');
+    const decreaseFontBtn = document.getElementById('decrease-font');
+    const FONT_SIZE_KEY = 'lumi_font_size';
+    const MIN_FONT_SIZE = 12;
+    const MAX_FONT_SIZE = 48;
+
+    // Load saved font size
+    let currentFontSize = parseInt(localStorage.getItem(FONT_SIZE_KEY)) || 18;
+    applyFontSize(currentFontSize);
+
+    increaseFontBtn.addEventListener('click', () => {
+        if (currentFontSize < MAX_FONT_SIZE) {
+            currentFontSize += 2;
+            applyFontSize(currentFontSize);
+            localStorage.setItem(FONT_SIZE_KEY, currentFontSize);
+        }
+    });
+
+    decreaseFontBtn.addEventListener('click', () => {
+        if (currentFontSize > MIN_FONT_SIZE) {
+            currentFontSize -= 2;
+            applyFontSize(currentFontSize);
+            localStorage.setItem(FONT_SIZE_KEY, currentFontSize);
+        }
+    });
+
+    function applyFontSize(size) {
+        bookContent.style.fontSize = size + 'px';
+    }
 
     try {
         console.log("Fetching data...");
@@ -44,16 +74,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         bookContent.addEventListener('click', (e) => {
             if (e.target.classList.contains('word')) {
                 const rawStart = e.target.getAttribute('data-start');
-                console.log("Clicked word. Raw data-start:", rawStart);
                 const start = parseFloat(rawStart);
 
                 if (!isNaN(start)) {
-                    console.log("Seeking to:", start);
-                    console.log("Audio seekable range:", audioPlayer.seekable.length > 0 ? audioPlayer.seekable.end(0) : "None");
-                    console.log("Current Time before seek:", audioPlayer.currentTime);
-
                     const doSeek = () => {
-                        console.log("Executing seek to:", start);
                         audioPlayer.currentTime = start;
                         audioPlayer.play().catch(err => console.error("Play failed:", err));
                     };
@@ -61,14 +85,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                     if (audioPlayer.seekable.length > 0) {
                         doSeek();
                     } else {
-                        console.log("Audio not seekable yet, waiting for canplay...");
-                        audioPlayer.addEventListener('canplay', () => {
-                            console.log("Audio ready, now seeking");
-                            doSeek();
-                        }, { once: true });
+                        audioPlayer.addEventListener('canplay', doSeek, { once: true });
                     }
-                } else {
-                    console.error("Invalid start time parsed:", start);
                 }
             }
         });
@@ -82,7 +100,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (chunkIndex < 0 || chunkIndex * CHUNK_SIZE >= sortedParagraphs.length) return;
 
         console.log(`Rendering chunk ${chunkIndex}`);
-        bookContent.innerHTML = ''; // Clear previous chunk
+        bookContent.innerHTML = '';
 
         const startIndex = chunkIndex * CHUNK_SIZE;
         const endIndex = Math.min((chunkIndex + 1) * CHUNK_SIZE, sortedParagraphs.length);
@@ -90,12 +108,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const chunkParagraphs = sortedParagraphs.slice(startIndex, endIndex);
         const fragment = document.createDocumentFragment();
 
-        // We need words that fall within this chunk's time range
-        const chunkStartTime = chunkParagraphs[0].start;
-        const chunkEndTime = chunkParagraphs[chunkParagraphs.length - 1].end;
-
-        // Find start word index
-        let wordIdx = findWordIndex(chunkStartTime);
+        let wordIdx = findWordIndex(chunkParagraphs[0].start);
 
         chunkParagraphs.forEach(p => {
             const pElement = document.createElement('p');
@@ -103,9 +116,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             while (wordIdx < wordsData.length) {
                 const wordObj = wordsData[wordIdx];
-                if (wordObj.start >= p.end) break; // Belongs to next paragraph
+                if (wordObj.start >= p.end) break;
 
-                if (wordObj.start >= p.start) { // Should be true if sorted correctly
+                if (wordObj.start >= p.start) {
                     const wordSpan = document.createElement('span');
                     wordSpan.className = 'word';
                     wordSpan.textContent = wordObj.word;
@@ -120,8 +133,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         bookContent.appendChild(fragment);
         currentChunkIndex = chunkIndex;
-        // Scroll to top of content when changing chunks manually? 
-        // Or let sync handle it.
+
+        // Reapply font size after rendering
+        applyFontSize(currentFontSize);
     }
 
     function findWordIndex(time) {
@@ -134,30 +148,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         return low;
     }
 
-    function findParagraphIndex(time) {
-        let low = 0, high = sortedParagraphs.length - 1;
-        let idx = -1;
-        while (low <= high) {
-            const mid = Math.floor((low + high) / 2);
-            if (time >= sortedParagraphs[mid].start && time <= sortedParagraphs[mid].end) {
-                return mid;
-            }
-            if (time < sortedParagraphs[mid].start) high = mid - 1;
-            else low = mid + 1;
-        }
-        // Fallback: mostly likely in a gap or silence. Return closest previous?
-        // If low > 0, return low - 1 (the paragraph that ended before this time).
-        // Or simple constraint:
-        if (arrCheck(low)) return low;
-        if (arrCheck(high)) return high;
-        return -1;
-
-        function arrCheck(i) {
-            return i >= 0 && i < sortedParagraphs.length && time >= sortedParagraphs[i].start && time <= sortedParagraphs[i].end;
-        }
-    }
-
-    // Rough search for "closest future paragraph" if silence
     function findClosestParagraphIndex(time) {
         let low = 0, high = sortedParagraphs.length - 1;
         let best = 0;
@@ -181,13 +171,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         const savedTime = parseFloat(localStorage.getItem(STORAGE_KEY));
         let initialTime = (!isNaN(savedTime) && isFinite(savedTime)) ? savedTime : 0;
 
-        // Render initial state
         let pIdx = findClosestParagraphIndex(initialTime);
         let cIdx = Math.floor(pIdx / CHUNK_SIZE);
         renderChunk(cIdx);
 
         if (initialTime > 0) {
-            console.log("Restoring time:", initialTime);
             if (audioPlayer.readyState >= 1) audioPlayer.currentTime = initialTime;
             else audioPlayer.addEventListener('loadedmetadata', () => { audioPlayer.currentTime = initialTime; }, { once: true });
         }
@@ -195,47 +183,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         function updateHighlight() {
             const currentTime = audioPlayer.currentTime;
 
-            // Throttle save
             const now = Date.now();
             if (now - lastSaveTime > 1000) {
                 localStorage.setItem(STORAGE_KEY, currentTime);
                 lastSaveTime = now;
             }
 
-            // 1. Determine correct chunk
             let pIdx = findClosestParagraphIndex(currentTime);
-            // Check if pIdx is valid for this time (or close enough)
-            // If currentTime is way past the end of pIdx (gap), we might want next one?
-            // "ClosestParagraphIndex" finds the one that started before `time`.
-            // So if time is 100, and P1 is 0-50, P2 is 102-150.
-            // pIdx(100) -> P1. But we are closer to P2?
-            // Effectively, we just want to ensure we are showing the text that *covers* this time.
-
             let targetChunk = Math.floor(pIdx / CHUNK_SIZE);
             if (targetChunk !== currentChunkIndex) {
                 renderChunk(targetChunk);
             }
 
-            // 2. Highlight word in current chunk
-            // We just query selector in the *current reduced DOM*, so it's fast.
+            // Search the DOM elements directly (not the full data array)
             const wordSpans = document.getElementsByClassName('word');
-            // optimization: binary search is still useful since we have data-start attributes.
-            // But strict linear scan of 2000-3000 words (50 paragraphs) is trivial for JS.
-
-            // Linear scan on reduced DOM is fine
-            let activeSpan = null;
-            // Optimization: Start from middle? No, standard loop.
-            // Or use the binary search logic on 'wordsData' to find the index, then map to DOM?
-            // "Find index in wordsData" -> check if that index is in rendered DOM range? 
-            // Too complex mapping.
-            // Simple: Just iterate spans?
-            // With 50 paragraphs, maybe ~5000 words. 60Hz loop might be heavy?
-            // Let's optimize: only re-scan if time changed significantly?
-            // Or binary search the DOM elements based on data-start?
-
-            // Let's use the binary search on DOM nodes method.
-            let low = 0, high = wordSpans.length - 1;
             let found = -1;
+            let low = 0, high = wordSpans.length - 1;
 
             while (low <= high) {
                 const mid = Math.floor((low + high) / 2);
@@ -254,18 +217,14 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
 
             if (found !== -1) {
-                // Clear existing
                 const prev = document.querySelector('.active-word');
                 if (prev) prev.classList.remove('active-word');
 
-                activeSpan = wordSpans[found];
+                const activeSpan = wordSpans[found];
                 activeSpan.classList.add('active-word');
 
-                // Visible check
-                const rect = activeSpan.getBoundingClientRect();
-                if (rect.top < 0 || rect.bottom > window.innerHeight) {
-                    activeSpan.scrollIntoView({ behavior: 'auto', block: 'center' });
-                }
+                // Always keep highlighted word centered
+                activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
             }
         }
 

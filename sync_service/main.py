@@ -5,6 +5,7 @@ import torch
 import json
 from pathlib import Path
 import numpy as np
+from tqdm import tqdm
 
 def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
@@ -35,14 +36,16 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
     
     # The segments object is a generator, so we need to process it
     word_level_data = []
-    for segment in segments:
-        for word in segment.words:
-            word_level_data.append({
-                "word": word.word,
-                "start": word.start,
-                "end": word.end,
-                "score": word.probability
-            })
+    with tqdm(total=info.duration, desc="Transcribing with word-level timestamps") as pbar:
+        for segment in segments:
+            for word in segment.words:
+                word_level_data.append({
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end,
+                    "score": word.probability
+                })
+            pbar.update(segment.end - pbar.n)
 
     with open(output_path, "w") as f:
         json.dump(word_level_data, f, indent=4)
@@ -75,7 +78,6 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     # 3. Align and Map (Segment by Segment)
     print("Aligning transcribed text with ground-truth text (segment by segment)...")
-    from tqdm import tqdm # Import tqdm for progress bar
 
     sync_map = {}
     transcribed_word_cursor = 0
@@ -223,7 +225,7 @@ if __name__ == "__main__":
         # Load model
         device = "cuda" if torch.cuda.is_available() else "cpu"
         compute_type = "int8_float16" if device == "cpu" else "int8_float16"
-        print("Loading Whisper model with compute type:", compute_type)
+        print("Loading Whisper model with device:", device, "and compute type:", compute_type)
         model = WhisperModel("large-v2", device=device, compute_type=compute_type)
 
         for audio_file in test_data_dir.glob("*.mp3"):
@@ -231,9 +233,13 @@ if __name__ == "__main__":
 
             if not text_file.exists():
                 print(f"Text file not found for {audio_file.name}. Generating text from audio...")
-                segments, _ = model.transcribe(str(audio_file))
+                segments, info = model.transcribe(str(audio_file))
                 
-                full_text = "".join(segment.text for segment in segments)
+                full_text = ""
+                with tqdm(total=info.duration, desc=f"Generating text for {audio_file.name}") as pbar:
+                    for segment in segments:
+                        full_text += segment.text
+                        pbar.update(segment.end - pbar.n)
                 
                 with open(text_file, "w", encoding="utf-8") as f:
                     f.write(full_text)

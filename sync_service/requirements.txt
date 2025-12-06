@@ -2,4 +2,4 @@ faster-whisper
 torch
 numpy
 tqdm
-hf-xet
+

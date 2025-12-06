@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 
-def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
+def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str, transcription_result=None):
     """
     Processes an audiobook and its text to generate a synchronization map.
 
@@ -16,6 +16,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         audio_path (str): Path to the audiobook file.
         text_path (str): Path to the text file.
         output_dir (str): Directory to save the output files.
+        transcription_result (tuple, optional): Pre-computed transcription result containing segments and info. Defaults to None.
     """
     audio_path = Path(audio_path)
     output_base_name = audio_path.stem
@@ -27,16 +28,20 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         print(f"Output for {audio_path.name} already exists. Skipping.")
         return
 
-    # 1. Transcribe the audio
-    print("Transcribing audio with word-level timestamps...")
-    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
+    # 1. Transcribe the audio if not already provided
+    if transcription_result:
+        print("Using pre-transcribed data.")
+        segments, info = transcription_result
+    else:
+        print("Transcribing audio with word-level timestamps...")
+        segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
     
     # Save the transcribed words
     output_path = output_dir / f"{output_base_name}_transcribed_words.json"
     
     # The segments object is a generator, so we need to process it
     word_level_data = []
-    with tqdm(total=round(info.duration), desc="Transcribing with word-level timestamps", unit='s') as pbar:
+    with tqdm(total=round(info.duration), desc="Processing transcription", unit='s') as pbar:
         for segment in segments:
             for word in segment.words:
                 word_level_data.append({
@@ -210,11 +215,11 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         
     return list(zip(reversed(align1), reversed(align2)))
 
-def main(model, audio_path, text_path, output_dir):
+def main(model, audio_path, text_path, output_dir, transcription_result=None):
     """
     Main function to run the synchronization process.
     """
-    process_audiobook(model, audio_path, text_path, output_dir)
+    process_audiobook(model, audio_path, text_path, output_dir, transcription_result=transcription_result)
 
 if __name__ == "__main__":
     test_data_dir = Path("c:/Code/Lumi/data")
@@ -231,14 +236,19 @@ if __name__ == "__main__":
 
         for audio_file in test_data_dir.glob("*.mp3"):
             text_file = audio_file.with_suffix(".txt")
+            transcription_result = None
 
             if not text_file.exists():
                 print(f"Text file not found for {audio_file.name}. Generating text from audio...")
-                segments, info = model.transcribe(str(audio_file))
+                segments, info = model.transcribe(str(audio_file), word_timestamps=True, vad_filter=True)
                 
+                # The segments generator needs to be realized into a list to be used multiple times.
+                segments_list = list(segments)
+                transcription_result = (segments_list, info)
+
                 full_text = ""
                 with tqdm(total=round(info.duration), desc=f"Generating text for {audio_file.name}", unit='s') as pbar:
-                    for segment in segments:
+                    for segment in segments_list:
                         full_text += segment.text
                         pbar.update(round(segment.end) - pbar.n)
                     pbar.update(pbar.total - pbar.n)
@@ -249,5 +259,5 @@ if __name__ == "__main__":
 
             if not output_dir.exists():
                 output_dir.mkdir(parents=True)
-            main(model, str(audio_file), str(text_file), str(output_dir))
+            main(model, str(audio_file), str(text_file), str(output_dir), transcription_result=transcription_result)
 

@@ -36,7 +36,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
     
     # The segments object is a generator, so we need to process it
     word_level_data = []
-    with tqdm(total=info.duration, desc="Transcribing with word-level timestamps") as pbar:
+    with tqdm(total=round(info.duration), desc="Transcribing with word-level timestamps", unit='s') as pbar:
         for segment in segments:
             for word in segment.words:
                 word_level_data.append({
@@ -45,7 +45,8 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
                     "end": word.end,
                     "score": word.probability
                 })
-            pbar.update(segment.end - pbar.n)
+            pbar.update(round(segment.end) - pbar.n)
+        pbar.update(pbar.total - pbar.n)
 
     with open(output_path, "w") as f:
         json.dump(word_level_data, f, indent=4)
@@ -236,10 +237,11 @@ if __name__ == "__main__":
                 segments, info = model.transcribe(str(audio_file))
                 
                 full_text = ""
-                with tqdm(total=info.duration, desc=f"Generating text for {audio_file.name}") as pbar:
+                with tqdm(total=round(info.duration), desc=f"Generating text for {audio_file.name}", unit='s') as pbar:
                     for segment in segments:
                         full_text += segment.text
-                        pbar.update(segment.end - pbar.n)
+                        pbar.update(round(segment.end) - pbar.n)
+                    pbar.update(pbar.total - pbar.n)
                 
                 with open(text_file, "w", encoding="utf-8") as f:
                     f.write(full_text)

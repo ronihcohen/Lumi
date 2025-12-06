@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from tqdm import tqdm
 import librosa
+import argparse
 
 def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
     """
@@ -145,10 +146,9 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     print(f"Processing complete. Outputs saved to {output_dir}")
 
-def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str, chunk_duration_minutes=360):
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
     """
     Generates a sync map directly from transcription segments when no ground-truth text is provided.
-    Processes the audio in chunks to manage memory usage for large files.
     """
     audio_path = Path(audio_path)
     output_base_name = audio_path.stem
@@ -163,49 +163,31 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
 
     print(f"Generating text and sync map directly from audio for {audio_path.name}...")
     
-    # Get total audio duration to process in chunks
-    total_duration_seconds = librosa.get_duration(path=str(audio_path))
-    chunk_duration_seconds = chunk_duration_minutes * 60
-    
-    all_segments = []
-    
-    with tqdm(total=total_duration_seconds, desc="Transcribing audio in chunks", unit='s') as pbar:
-        for chunk_start in range(0, int(total_duration_seconds), chunk_duration_seconds):
-            chunk_end = min(chunk_start + chunk_duration_seconds, total_duration_seconds)
-            
-            # Load a chunk of audio
-            audio_chunk, sample_rate = librosa.load(str(audio_path), sr=16000, offset=chunk_start, duration=chunk_duration_seconds)
-            
-            # Transcribe the chunk
-            segments, _ = model.transcribe(audio_chunk, word_timestamps=True, vad_filter=True)
-            
-            # Adjust timestamps to be relative to the full audio, not the chunk
-            for segment in segments:
-                for word in segment.words:
-                    word.start += chunk_start
-                    word.end += chunk_start
-                all_segments.append(segment)
-            
-            pbar.update(chunk_end - chunk_start)
+    # Transcribe the audio. Faster-whisper handles chunking internally for file paths.
+    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
 
     # 2. Generate sync map, word-level data, and full text from transcription
     sync_map = {}
     word_level_data = []
     full_text_segments = []
     
-    for i, segment in enumerate(all_segments):
-        sync_map[f"p{i+1}"] = {
-            "start": segment.start,
-            "end": segment.end
-        }
-        full_text_segments.append(segment.text)
-        for word in segment.words:
-            word_level_data.append({
-                "word": word.word,
-                "start": word.start,
-                "end": word.end,
-                "score": word.probability
-            })
+    with tqdm(total=round(info.duration), desc="Processing transcription", unit='s') as pbar:
+        for i, segment in enumerate(segments):
+            sync_map[f"p{i+1}"] = {
+                "start": segment.start,
+                "end": segment.end
+            }
+            full_text_segments.append(segment.text)
+            for word in segment.words:
+                word_level_data.append({
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end,
+                    "score": word.probability
+                })
+            pbar.update(round(segment.end) - pbar.n)
+        pbar.update(pbar.total - pbar.n)
+
 
     # 3. Save all the generated files
     # Save sync map
@@ -313,34 +295,35 @@ def needleman_wunsch(seq1, seq2, match_score=1, mismatch_score=-1, gap_penalty=-
         
     return list(zip(reversed(align1), reversed(align2)))
 
-def main(model, audio_path, text_path, output_dir):
-    """
-    Main function to run the synchronization process.
-    """
-    process_audiobook(model, audio_path, text_path, output_dir)
-
 if __name__ == "__main__":
-    test_data_dir = Path("c:/Code/Lumi/data")
-    output_dir = Path("c:/Code/Lumi/sync_service/output")
+    parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
+    parser.add_argument("--data-dir", type=str, default="data", help="Directory containing audio and text files.")
+    parser.add_argument("--output-dir", type=str, default="sync_service/output", help="Directory to save output files.")
+    parser.add_argument("--model-size", type=str, default="large-v2", help="Size of the Whisper model to use.")
+    parser.add_argument("--device", type=str, default=None, help="Device to use for computation ('cuda' or 'cpu'). Auto-detects if not specified.")
+    parser.add_argument("--compute-type", type=str, default="int8_float16", help="Compute type for the model. Examples: 'int8_float16', 'float16', 'int8'.")
+    args = parser.parse_args()
 
-    if not test_data_dir.exists():
-        print(f"Error: Directory not found at '{test_data_dir}'")
+    data_dir = Path(args.data_dir)
+    output_dir = Path(args.output_dir)
+
+    if not data_dir.exists():
+        print(f"Error: Data directory not found at '{data_dir}'")
     else:
-        # Load model
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "int8_float16" if device == "cpu" else "int8_float16"
-        print("Loading Whisper model with device:", device, "and compute type:", compute_type)
-        model = WhisperModel("large-v2", device=device, compute_type=compute_type)
+        device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+        compute_type = args.compute_type
+        
+        print(f"Loading Whisper model '{args.model_size}' with device: {device} and compute type: {compute_type}")
+        model = WhisperModel(args.model_size, device=device, compute_type=compute_type)
 
-        if not output_dir.exists():
-            output_dir.mkdir(parents=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        for audio_file in test_data_dir.glob("*.mp3"):
+        for audio_file in data_dir.glob("*.mp3"):
             text_file = audio_file.with_suffix(".txt")
 
             if text_file.exists():
                 print(f"Text file found for {audio_file.name}. Processing with alignment.")
-                main(model, str(audio_file), str(text_file), str(output_dir))
+                process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
             else:
                 print(f"Text file not found for {audio_file.name}.")
                 create_sync_map_from_transcription(model, str(audio_file), str(output_dir))

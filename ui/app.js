@@ -10,6 +10,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     let sortedParagraphs = [];
     let currentChunkIndex = -1;
     let currentBook = null;
+    let currentUpdateHighlight = null;
+    let currentSavePausePosition = null;
     const CHUNK_SIZE = 50;
 
     // Font size controls
@@ -70,6 +72,13 @@ document.addEventListener('DOMContentLoaded', async () => {
         bookSelector.addEventListener('change', () => {
             const newBook = bookSelector.value;
             if (newBook && newBook !== currentBook) {
+                // Save current position before switching (regardless of playback state)
+                if (currentBook) {
+                    const oldStorageKey = `lumi_${currentBook}_last_time`;
+                    localStorage.setItem(oldStorageKey, audioPlayer.currentTime);
+                    console.log(`Saved position for ${currentBook}:`, audioPlayer.currentTime);
+                }
+
                 localStorage.setItem('lumi_selected_book', newBook);
                 loadBook(newBook);
             }
@@ -83,8 +92,22 @@ document.addEventListener('DOMContentLoaded', async () => {
         bookContent.innerHTML = `<p style="color: red">Error loading books: ${error.message}</p>`;
     }
 
+    function cleanupListeners() {
+        if (currentUpdateHighlight) {
+            audioPlayer.removeEventListener('timeupdate', currentUpdateHighlight);
+            audioPlayer.removeEventListener('seeked', currentUpdateHighlight);
+            currentUpdateHighlight = null;
+        }
+        if (currentSavePausePosition) {
+            audioPlayer.removeEventListener('pause', currentSavePausePosition);
+            currentSavePausePosition = null;
+        }
+    }
+
     async function loadBook(bookName) {
         try {
+            cleanupListeners(); // Cleanup old listeners BEFORE changing source/loading
+
             console.log("Loading book:", bookName);
             currentBook = bookName;
 
@@ -218,13 +241,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         const savedTime = parseFloat(localStorage.getItem(STORAGE_KEY));
         let initialTime = (!isNaN(savedTime) && isFinite(savedTime)) ? savedTime : 0;
 
+        console.log(`Restoring position for ${currentBook}:`, initialTime);
+
         let pIdx = findClosestParagraphIndex(initialTime);
         let cIdx = Math.floor(pIdx / CHUNK_SIZE);
         renderChunk(cIdx);
 
+        // Restore playback position
         if (initialTime > 0) {
-            if (audioPlayer.readyState >= 1) audioPlayer.currentTime = initialTime;
-            else audioPlayer.addEventListener('loadedmetadata', () => { audioPlayer.currentTime = initialTime; }, { once: true });
+            const restorePosition = () => {
+                audioPlayer.currentTime = initialTime;
+                console.log(`Position set to:`, audioPlayer.currentTime);
+            };
+
+            if (audioPlayer.readyState >= 2) {
+                // Audio is already loaded enough to seek
+                restorePosition();
+            } else {
+                // Wait until we can seek
+                audioPlayer.addEventListener('canplay', restorePosition, { once: true });
+            }
         }
 
         function updateHighlight() {
@@ -272,14 +308,15 @@ document.addEventListener('DOMContentLoaded', async () => {
             }
         }
 
-        audioPlayer.removeEventListener('timeupdate', updateHighlight);
-        audioPlayer.removeEventListener('seeked', updateHighlight);
-        audioPlayer.removeEventListener('pause', savePausePosition);
-
         function savePausePosition() {
             localStorage.setItem(STORAGE_KEY, audioPlayer.currentTime);
         }
 
+        // Store references for next cleanup
+        currentUpdateHighlight = updateHighlight;
+        currentSavePausePosition = savePausePosition;
+
+        // Add new event listeners
         audioPlayer.addEventListener('timeupdate', updateHighlight);
         audioPlayer.addEventListener('seeked', updateHighlight);
         audioPlayer.addEventListener('pause', savePausePosition);

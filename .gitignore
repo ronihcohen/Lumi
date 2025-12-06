@@ -106,3 +106,4 @@ venv.bak/
 # self modified
 /data/
 /sync_service/output/
+/ui/data

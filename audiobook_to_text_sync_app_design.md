@@ -94,12 +94,12 @@ The application will follow a client-server architecture.
 
 ## 6. Synchronization Implementation Details
 
-The synchronization process is the core feature of the application, and its accuracy is critical for a good user experience. The `Sync Service` will use **WhisperX** (validated against v3.7.4 or newer) to generate highly precise word-level timestamps. The entire process is automated and broken down into the following pipeline:
+The synchronization process is the core feature of the application, and its accuracy is critical for a good user experience. The `Sync Service` will use **`faster-whisper`**, a high-performance implementation of OpenAI's Whisper model, to generate highly precise word-level timestamps. The entire process is automated and broken down into the following pipeline:
 
 1.  **File Upload and Pre-processing**:
-    *   The user uploads an audiobook file (e.g., `book.mp3`) and a text file (e.g., `book.epub`).
-    *   The `Sync Service` first converts the e-book into a clean, plain text format.
-    *   The plain text is then segmented into a structured list of sentences or paragraphs, each with a unique ID. This is the **ground-truth text**.
+    *   The user uploads an audiobook file (e.g., `book.mp3`) and a text file (e.g., `book.txt`).
+    *   The `Sync Service` expects a clean, plain text format. If the original text is in another format (e.g., EPUB), it must be converted first.
+    *   The plain text is then segmented into a structured list of paragraphs (based on double newlines), each with a unique ID. This is the **ground-truth text**.
     *   Example of segmented ground-truth text (`segments.json`):
         ```json
         [
@@ -108,32 +108,28 @@ The synchronization process is the core feature of the application, and its accu
         ]
         ```
 
-2.  **Step 1: High-Performance Transcription (WhisperX)**:
-    *   The audiobook file is loaded and processed by a Whisper model within WhisperX (`whisperx.load_model`, `model.transcribe`).
-    *   This step generates a highly accurate transcription of the audio with initial segment-level timestamps.
-
-3.  **Step 2: Word-Level Forced Alignment (WhisperX)**:
-    *   The transcribed segments from the previous step are then passed to WhisperX's alignment model (`whisperx.load_align_model`, `whisperx.align`).
-    *   This performs a forced alignment to produce precise `start` and `end` timestamps for every single word in the *transcribed* text.
-    *   Example of WhisperX word-level output (`transcribed_words.json`):
+2.  **Step 1: Transcription with Word-Level Timestamps (faster-whisper)**:
+    *   The audiobook file is loaded and processed by a `faster-whisper` model (`WhisperModel`).
+    *   The model's `transcribe` method is called with `word_timestamps=True`. This single step generates a highly accurate transcription of the audio with precise `start` and `end` timestamps for every single word.
+    *   Example of `faster-whisper` word-level output (`transcribed_words.json`):
         ```json
         [
-            {"word": "The", "start": 0.12, "end": 0.34},
-            {"word": "quick", "start": 0.35, "end": 0.67},
-            {"word": "brown", "start": 0.68, "end": 0.95, "score": 0.98},
+            {"word": " The", "start": 0.12, "end": 0.34, "probability": 0.99},
+            {"word": " quick", "start": 0.35, "end": 0.67, "probability": 0.98},
+            {"word": " brown", "start": 0.68, "end": 0.95, "probability": 0.98},
             // ... and so on for every transcribed word
         ]
         ```
 
-4.  **Step 3: Mapping Timestamps to Ground-Truth Text**:
+3.  **Step 2: Mapping Timestamps to Ground-Truth Text**:
     *   This is a crucial step to bridge the gap between the transcribed text and the original book text. Minor differences (e.g., punctuation, narrator ad-libs) are expected.
-    *   A text alignment algorithm (e.g., a sequence alignment algorithm like Needleman-Wunsch) will be used to map the words from the **ground-truth text** to the timestamped words from the **WhisperX transcription**.
+    *   A text alignment algorithm (**Needleman-Wunsch**, implemented within the service) is used to map the words from the **ground-truth text** to the timestamped words from the **`faster-whisper` transcription**.
     *   This creates a definitive link between the original book content and the audio timing.
 
-5.  **Step 4: Final Sync Map Generation**:
-    *   Using the mapping from the previous step, the `Sync Service` generates the final `sync.json` file.
-    *   For each segment in the ground-truth text (e.g., paragraph `p1`), the service finds the `start` time of its first mapped word and the `end` time of its last mapped word from the WhisperX output.
-    *   Example of the final `sync.json`:
+4.  **Step 3: Final Sync Map Generation**:
+    *   Using the mapping from the previous step, the `Sync Service` generates the final `sync_map.json` file.
+    *   For each segment in the ground-truth text (e.g., paragraph `p1`), the service finds the `start` time of its first mapped word and the `end` time of its last mapped word from the transcription output.
+    *   Example of the final `sync_map.json`:
         ```json
         {
           "p1": { "start": 0.12, "end": 2.51 },
@@ -141,13 +137,13 @@ The synchronization process is the core feature of the application, and its accu
         }
         ```
 
-6.  **Client-side Implementation**:
-    *   When a user plays an audiobook, the client application fetches the audio file, the segmented ground-truth text (`segments.json`), and the final synchronization map (`sync.json`).
+5.  **Client-side Implementation**:
+    *   When a user plays an audiobook, the client application fetches the audio file, the segmented ground-truth text (`segments.json`), and the final synchronization map (`sync_map.json`).
     *   As the audio plays, the application monitors the `currentTime` of the audio player.
-    *   It uses this `currentTime` to look up which segment should be active by finding the segment in `sync.json` where `currentTime` is between `start` and `end`.
+    *   It uses this `currentTime` to look up which segment should be active by finding the segment in `sync_map.json` where `currentTime` is between `start` and `end`.
     *   The application then applies a highlight to the corresponding text segment on the screen.
 
-This detailed, multi-step process leverages the power of WhisperX for accurate timestamp generation and ensures that the final synchronization is correctly mapped to the original source text.
+This detailed, multi-step process leverages the power of `faster-whisper` for accurate timestamp generation and ensures that the final synchronization is correctly mapped to the original source text.
 
 ## 7. UI/UX
 
@@ -169,7 +165,7 @@ This detailed, multi-step process leverages the power of WhisperX for accurate t
     *   **Cache**: Redis for caching session data and frequently accessed content.
 *   **Storage**: AWS S3 or Google Cloud Storage for storing media files.
 *   **Synchronization Service**:
-    *   **Forced Alignment Engine**: The application will use **WhisperX**. It is a popular and highly accurate forced alignment engine that leverages the Whisper ASR model. Its accuracy at the word level makes it an excellent choice for creating a precise and reliable synchronization experience. It will be self-hosted and integrated directly into the `Sync Service`.
+    *   **Transcription and Alignment Engine**: The application will use **`faster-whisper`**. It is a reimplementation of OpenAI's Whisper model that is up to 4 times faster and uses less memory, while providing highly accurate word-level timestamps. It will be self-hosted and integrated directly into the `Sync Service`.
 *   **DevOps**: Docker, Kubernetes, GitHub Actions for CI/CD.
 
 ## 9. Challenges

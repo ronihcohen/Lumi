@@ -16,12 +16,22 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
         text_path (str): Path to the text file.
         output_dir (str): Directory to save the output files.
     """
+    audio_path = Path(audio_path)
+    output_base_name = audio_path.stem
+    output_dir = Path(output_dir)
+
+    # Check if the final sync map already exists
+    sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
+    if sync_map_path.exists():
+        print(f"Output for {audio_path.name} already exists. Skipping.")
+        return
+
     # 1. Transcribe the audio
     print("Transcribing audio with word-level timestamps...")
-    segments, info = model.transcribe(audio_path, word_timestamps=True, vad_filter=True)
+    segments, info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
     
     # Save the transcribed words
-    output_path = Path(output_dir) / "transcribed_words.json"
+    output_path = output_dir / f"{output_base_name}_transcribed_words.json"
     
     # The segments object is a generator, so we need to process it
     word_level_data = []
@@ -59,7 +69,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
             })
 
     # Save the segmented ground-truth text
-    ground_truth_path = Path(output_dir) / "segments.json"
+    ground_truth_path = output_dir / f"{output_base_name}_segments.json"
     with open(ground_truth_path, "w", encoding="utf-8") as f:
         json.dump(ground_truth_segments, f, indent=4)
 
@@ -126,7 +136,6 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
 
     # Save the final sync map
-    sync_map_path = Path(output_dir) / "sync_map.json"
     with open(sync_map_path, "w", encoding="utf-8") as f:
         json.dump(sync_map, f, indent=4)
 
@@ -211,16 +220,14 @@ if __name__ == "__main__":
     if not test_data_dir.exists():
         print(f"Error: Directory not found at '{test_data_dir}'")
     else:
-        audio_file = next(test_data_dir.glob("*.mp3"), None)
+        # Load model
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        compute_type = "int8_float16" if device == "cpu" else "int8_float16"
+        print("Loading Whisper model with compute type:", compute_type)
+        model = WhisperModel("large-v2", device=device, compute_type=compute_type)
 
-        if audio_file:
+        for audio_file in test_data_dir.glob("*.mp3"):
             text_file = audio_file.with_suffix(".txt")
-
-            # Load model
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "int8_float16" if device == "cpu" else "int8_float16"
-            print("Loading Whisper model...")
-            model = WhisperModel("large-v2", device=device, compute_type=compute_type)
 
             if not text_file.exists():
                 print(f"Text file not found for {audio_file.name}. Generating text from audio...")
@@ -235,5 +242,4 @@ if __name__ == "__main__":
             if not output_dir.exists():
                 output_dir.mkdir(parents=True)
             main(model, str(audio_file), str(text_file), str(output_dir))
-        else:
-            print("No .mp3 file found in the test_data directory.")
+

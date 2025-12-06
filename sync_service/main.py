@@ -145,7 +145,7 @@ def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, outp
 
     print(f"Processing complete. Outputs saved to {output_dir}")
 
-def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str, chunk_duration_minutes=30):
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str, chunk_duration_minutes=360):
     """
     Generates a sync map directly from transcription segments when no ground-truth text is provided.
     Processes the audio in chunks to manage memory usage for large files.

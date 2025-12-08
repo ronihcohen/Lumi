@@ -1,2 +1,2 @@
-TTS
+coqui-tts
 torch

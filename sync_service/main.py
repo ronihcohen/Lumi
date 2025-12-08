@@ -446,9 +446,9 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
-    parser.add_argument("--data-dir", type=str, default="data", help="Directory containing audio and text files.")
+    parser.add_argument("--data-dir", type=str, default="../data", help="Directory containing audio and text files.")
     parser.add_argument("--output-dir", type=str, default="sync_service/output", help="Directory to save output files.")
-    parser.add_argument("--model-size", type=str, default="large-v2", help="Model size.")
+    parser.add_argument("--model-size", type=str, default="tiny", help="Model size.")
     parser.add_argument("--device", type=str, default=None, help="Device ('cuda' or 'cpu').")
     parser.add_argument("--compute-type", type=str, default="int8_float16", help="Compute type.")
     args = parser.parse_args()

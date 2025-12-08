@@ -2,13 +2,16 @@
 
 ## Setup (One-Time)
 
-```powershell
+```bash
 # Create and activate virtual environment
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Install dependencies
-pip install -r sync_service\requirements.txt
+# Install system dependencies
+sudo apt install ffmpeg
+
+# Install python dependencies
+pip install -r sync_service/requirements.txt
 ```
 
 ---
@@ -17,28 +20,28 @@ pip install -r sync_service\requirements.txt
 
 ### Quick Start Commands
 
-```powershell
+```bash
 # Fastest (Tiny Model - Testing)
-python sync_service\main.py --model-size tiny
+python sync_service/main.py --model-size tiny
 
 # Recommended (Base Model - Good Balance)
-python sync_service\main.py --model-size base
+python sync_service/main.py --model-size base
 
 # High Accuracy (Large Model - Slow)
-python sync_service\main.py --model-size large-v3
+python sync_service/main.py --model-size large-v3
 ```
 
 ### Advanced Options
 
-```powershell
+```bash
 # CPU Only (No GPU)
-python sync_service\main.py --model-size base --device cpu
+python sync_service/main.py --model-size base --device cpu
 
 # Custom Directories
-python sync_service\main.py --data-dir "path\to\audiobooks" --output-dir "path\to\output"
+python sync_service/main.py --data-dir "path/to/audiobooks" --output-dir "path/to/output"
 
 # Maximum Accuracy (Requires GPU)
-python sync_service\main.py --model-size large-v3 --device cuda --compute-type float16
+python sync_service/main.py --model-size large-v3 --device cuda --compute-type float16
 ```
 
 ### Model Size Comparison
@@ -55,19 +58,19 @@ python sync_service\main.py --model-size large-v3 --device cuda --compute-type f
 
 ## Copy Files to UI
 
-```powershell
+```bash
 # Copy all generated files
-copy sync_service\output\*.json ui\data\
-copy data\*.mp3 ui\data\
+cp sync_service/output/*.json ui/data/
+cp data/*.mp3 ui/data/
 ```
 
 ---
 
 ## Run UI Server
 
-```powershell
+```bash
 # Start server (default port 8000)
-python ui\server.py
+python ui/server.py
 ```
 
 Then open browser to: **http://localhost:8000**
@@ -76,23 +79,23 @@ Then open browser to: **http://localhost:8000**
 
 ## Complete Workflow (New Audiobook)
 
-```powershell
+```bash
 # 1. Place files in data folder
 #    - my_book.mp3
 #    - my_book.txt (optional)
 
 # 2. Activate environment
-.\.venv\Scripts\Activate.ps1
+source .venv/bin/activate
 
 # 3. Process audiobook
-python sync_service\main.py --model-size base
+python sync_service/main.py --model-size base
 
 # 4. Copy to UI
-copy sync_service\output\*.json ui\data\
-copy data\*.mp3 ui\data\
+cp sync_service/output/*.json ui/data/
+cp data/*.mp3 ui/data/
 
 # 5. Start server
-python ui\server.py
+python ui/server.py
 
 # 6. Open http://localhost:8000 in browser
 ```
@@ -102,18 +105,18 @@ python ui\server.py
 ## Troubleshooting
 
 ### Command: Check ffmpeg is installed
-```powershell
+```bash
 ffmpeg -version
 ffprobe -version
 ```
 
 ### Command: Test server is running
-```powershell
+```bash
 curl http://localhost:8000/api/books
 ```
 
 ### Command: Check CUDA availability
-```powershell
+```bash
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
 
@@ -124,7 +127,7 @@ The server auto-switches to port 8001. Check console output for the actual port.
 
 ## File Requirements
 
-For a book to appear in the UI, you need in `ui\data\`:
+For a book to appear in the UI, you need in `ui/data/`:
 - ✅ `{book}.mp3`
 - ✅ `{book}_sync_map.json`
 - ✅ `{book}_transcribed_words.json`

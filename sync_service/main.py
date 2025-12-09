@@ -5,18 +5,40 @@ import json
 import logging
 import math
 import queue
+import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Generator, Any
+from typing import List, Dict, Optional, Tuple, Any
 
 import numpy as np
 import torch
 from faster_whisper import WhisperModel
-from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+import re
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize a filename by replacing special characters with underscores.
+    Removes characters that cause issues in URLs and file systems.
+    
+    Args:
+        filename: The original filename (without extension).
+        
+    Returns:
+        Sanitized filename safe for URLs and file systems.
+    """
+    # Replace common problematic characters with underscores
+    # Includes: ; , : ? * " < > | ' & # % @ ! $ ^ + = ` ~ [ ] { } ( )
+    sanitized = re.sub(r'[;,:\?\*"<>\|\'\&#%@!\$\^\+=`~\[\]\{\}\(\)]', '_', filename)
+    # Replace multiple consecutive underscores with a single one
+    sanitized = re.sub(r'_+', '_', sanitized)
+    # Remove leading/trailing underscores
+    sanitized = sanitized.strip('_')
+    return sanitized
 
 def get_audio_duration(audio_path: str) -> float:
     """
@@ -204,77 +226,6 @@ def transcribe_audio_stream(model: WhisperModel, audio_path: str, chunk_duration
 
     return all_segments, duration_sec
 
-def needleman_wunsch(seq1: List[str], seq2: List[Dict[str, Any]], match_score=1, mismatch_score=-1, gap_penalty=-1) -> List[Tuple[Optional[str], Optional[Dict[str, Any]]]]:
-    """
-    Memory Optimized Needleman-Wunsch algorithm using Int16 for score matrix.
-    Aligns a list of strings (seq1) with a list of word dictionaries (seq2).
-    """
-    # 1. Pre-process strings for comparison
-    seq1_cleaned = [word.lower().strip(".,!?\"'") for word in seq1]
-    seq2_cleaned = [word['word'].lower().strip(".,!?\"'") for word in seq2]
-
-    n = len(seq1)
-    m = len(seq2)
-    
-    # 2. Memory Optimization: Use int16 instead of float64/int64
-    score = np.zeros((n + 1, m + 1), dtype=np.int16)
-
-    # Initialization
-    score[:, 0] = np.arange(n + 1) * gap_penalty
-    score[0, :] = np.arange(m + 1) * gap_penalty
-
-    # Fill table
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
-            
-            match = score[i - 1, j - 1] + match_val
-            delete = score[i - 1, j] + gap_penalty
-            insert = score[i, j - 1] + gap_penalty
-            
-            # Manual max
-            if match >= delete and match >= insert:
-                score[i, j] = match
-            elif delete >= insert:
-                score[i, j] = delete
-            else:
-                score[i, j] = insert
-
-    # Traceback
-    align1, align2 = [], []
-    i, j = n, m
-    while i > 0 and j > 0:
-        score_current = score[i][j]
-        score_diagonal = score[i - 1][j - 1]
-        score_left = score[i - 1][j]
-        
-        match_val = match_score if seq1_cleaned[i-1] == seq2_cleaned[j-1] else mismatch_score
-        
-        if score_current == score_diagonal + match_val:
-            align1.append(seq1[i - 1])
-            align2.append(seq2[j - 1])
-            i -= 1
-            j -= 1
-        elif score_current == score_left + gap_penalty:
-            align1.append(seq1[i - 1])
-            align2.append(None)
-            i -= 1
-        else: 
-            align1.append(None)
-            align2.append(seq2[j - 1])
-            j -= 1
-    
-    while i > 0:
-        align1.append(seq1[i - 1])
-        align2.append(None)
-        i -= 1
-    while j > 0:
-        align1.append(None)
-        align2.append(seq2[j - 1])
-        j -= 1
-        
-    return list(zip(reversed(align1), reversed(align2)))
-
 def save_sync_outputs(output_dir: Path, base_name: str, sync_map: Dict, word_data: List[Dict], segments: List[Dict], text_content: Optional[str] = None):
     """Helper to save all output JSON files."""
     
@@ -293,119 +244,20 @@ def save_sync_outputs(output_dir: Path, base_name: str, sync_map: Dict, word_dat
             
     logging.info(f"Saved outputs to {output_dir}")
 
-def process_audiobook(model: WhisperModel, audio_path: str, text_path: str, output_dir: str):
+def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str) -> str:
     """
-    Process an audiobook with existing ground-truth text.
-    Transcribes audio, segments text, and aligns them.
-    """
-    audio_path = Path(audio_path)
-    output_base_name = audio_path.stem
-    output_dir = Path(output_dir)
-
-    sync_map_path = output_dir / f"{output_base_name}_sync_map.json"
-    if sync_map_path.exists():
-        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
-        return
-
-    # 1. Transcribe
-    logging.info("Step 1/3: Transcribing audio...")
-    raw_segments, _ = transcribe_audio_stream(model, str(audio_path))
+    Generate sync map directly from audio transcription.
     
-    word_level_data = []
-    for seg in raw_segments:
-        if seg.get("words"):
-            word_level_data.extend(seg["words"])
-
-    # 2. Process Ground Truth
-    logging.info("Step 2/3: Processing ground-truth text...")
-    with open(text_path, "r", encoding="utf-8") as f:
-        ground_truth_text = f.read()
-    
-    ground_truth_segments = []
-    raw_paragraphs = ground_truth_text.split('\n\n')
-    
-    p_counter = 1
-    for p_text in raw_paragraphs:
-        cleaned = " ".join(p_text.split())
-        if not cleaned: continue
-        
-        words_in_p = cleaned.split()
-        if len(words_in_p) > 300:
-            # Simple sentence split for large paragraphs
-            sentences = cleaned.replace('. ', '.\n').replace('? ', '?\n').replace('! ', '!\n').split('\n')
-            for s in sentences:
-                if s.strip():
-                    ground_truth_segments.append({"id": f"p{p_counter}", "text": s.strip()})
-                    p_counter += 1
-        else:
-            ground_truth_segments.append({"id": f"p{p_counter}", "text": cleaned})
-            p_counter += 1
-
-    # 3. Align
-    logging.info("Step 3/3: Aligning...")
-    sync_map = {}
-    transcribed_word_cursor = 0
-    
-    # Constants for Windowed Search
-    SEARCH_WINDOW_MULTIPLIER = 3
-    MIN_SEARCH_WINDOW = 100
-    MAX_SEARCH_WINDOW = 2000 
-
-    for segment in tqdm(ground_truth_segments, desc="Aligning segments"):
-        segment_words = segment['text'].split()
-        if not segment_words:
-            continue
-
-        start_pos = transcribed_word_cursor
-        window_size = max(len(segment_words) * SEARCH_WINDOW_MULTIPLIER, MIN_SEARCH_WINDOW)
-        window_size = min(window_size, MAX_SEARCH_WINDOW) 
-        
-        end_pos = min(start_pos + window_size, len(word_level_data))
-        search_window = word_level_data[start_pos:end_pos]
-        
-        if not search_window:
-            break
-
-        alignment = needleman_wunsch(segment_words, search_window)
-
-        start_time, end_time = None, None
-        last_matched_idx = -1
-        
-        window_ids = [id(w) for w in search_window]
-
-        for gt_word, whisper_word in alignment:
-            if gt_word is not None and whisper_word is not None:
-                if start_time is None:
-                    start_time = whisper_word["start"]
-                end_time = whisper_word["end"]
-                
-                try:
-                    idx = window_ids.index(id(whisper_word))
-                    last_matched_idx = idx
-                except ValueError:
-                    pass
-
-        if start_time is not None and end_time is not None:
-            sync_map[segment["id"]] = {"start": start_time, "end": end_time}
-            if last_matched_idx != -1:
-                transcribed_word_cursor = start_pos + last_matched_idx + 1
-        else:
-            transcribed_word_cursor += len(segment_words)
-
-    # Save
-    save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, ground_truth_segments)
-
-def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, output_dir: str):
-    """
-    Generate sync map directly from audio transcription (no ground truth).
+    Returns:
+        The sanitized base name used for output files.
     """
     audio_path = Path(audio_path)
-    output_base_name = audio_path.stem
+    output_base_name = sanitize_filename(audio_path.stem)
     output_dir = Path(output_dir)
 
     if (output_dir / f"{output_base_name}_sync_map.json").exists():
-        logging.info(f"Output for {audio_path.name} already exists. Skipping.")
-        return
+        logging.info(f"Output for {audio_path.name} already exists (as {output_base_name}). Skipping.")
+        return output_base_name
 
     logging.info(f"Generating full transcription for {audio_path.name}...")
     
@@ -418,7 +270,7 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
     sync_map = {}
     word_level_data = []
     full_text_segments = []
-    ground_truth_segments = []
+    segments = []
 
     for i, seg in enumerate(raw_segments):
         seg_id = f"p{i+1}"
@@ -430,7 +282,7 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
         clean_text = " ".join(seg["text"].split())
         if clean_text:
             full_text_segments.append(seg["text"])
-            ground_truth_segments.append({
+            segments.append({
                 "id": seg_id,
                 "text": clean_text
             })
@@ -439,17 +291,20 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
             word_level_data.extend(seg["words"])
 
     full_text = " ".join(full_text_segments)
-    save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, ground_truth_segments, full_text)
+    save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, segments, full_text)
 
     gc.collect()
     torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
-    parser.add_argument("--data-dir", type=str, default="../data", help="Directory containing audio and text files.")
-    parser.add_argument("--output-dir", type=str, default="sync_service/output", help="Directory to save output files.")
-    parser.add_argument("--model-size", type=str, default="tiny", help="Model size.")
-    parser.add_argument("--device", type=str, default=None, help="Device ('cuda' or 'cpu').")
+    parser.add_argument("--data-dir", type=str, default="../data", help="Directory containing audio files.")
+    parser.add_argument("--output-dir", type=str, default="../ui/data", help="Directory to save output files.")
+    parser.add_argument("--model-size", type=str, default="base.en", 
+                        choices=["tiny", "tiny.en", "base", "base.en", "small", "small.en", 
+                                 "medium", "medium.en", "large-v1", "large-v2", "large-v3"],
+                        help="Whisper model size (tiny/base/small=faster, medium/large=more accurate).")
+    parser.add_argument("--device", type=str, default="cuda", help="Device ('cuda' or 'cpu').")
     parser.add_argument("--compute-type", type=str, default="int8_float16", help="Compute type.")
     args = parser.parse_args()
 
@@ -473,11 +328,11 @@ if __name__ == "__main__":
                 logging.info(f"Found {len(audio_files)} MP3 file(s).")
                 for audio_file in audio_files:
                     logging.info(f"--- Processing: {audio_file.name} ---")
-                    text_file = audio_file.with_suffix(".txt")
-
-                    if text_file.exists():
-                        process_audiobook(model, str(audio_file), str(text_file), str(output_dir))
-                    else:
-                        create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+                    sanitized_name = create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+                    
+                    # Move processed input file to output folder with sanitized name
+                    sanitized_audio_name = f"{sanitized_name}.mp3"
+                    shutil.move(str(audio_file), str(output_dir / sanitized_audio_name))
+                    logging.info(f"Moved {audio_file.name} -> {sanitized_audio_name} to {output_dir}")
         except Exception as e:
             logging.critical(f"Fatal error initializing model or processing: {e}")

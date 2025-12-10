@@ -1,2 +1,4 @@
 coqui-tts
 torch
+tqdm
+spacy

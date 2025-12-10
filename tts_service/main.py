@@ -1,26 +1,15 @@
-import os
 import argparse
-from pathlib import Path
-from TTS.api import TTS
 import torch
-
-def generate_audio(txt_path, output_path, model_name="tts_models/multilingual/multi-dataset/xtts_v2", device="cuda"):
-    """
-    Generates audio from a text file using XTTS-v2.
-    """
-    if not torch.cuda.is_available() and device == "cuda":
-        print("CUDA not available, falling back to CPU")
-        device = "cpu"
-
-    print(f"Loading model: {model_name} on {device}...")
-    tts = TTS(model_name=model_name).to(device)
-
-    print(f"Reading text from {txt_path}...")
-    with open(txt_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    pass
+import re
+from pathlib import Path
+from tqdm import tqdm
+from TTS.api import TTS
 
 def main():
+    """
+    Main function to parse arguments, initialize the XTTS model, and process 
+    text files in a batch, applying necessary text cleaning for smooth audio flow.
+    """
     parser = argparse.ArgumentParser(description="Batch TTS using XTTS-v2")
     parser.add_argument("--txt-dir", type=str, default="../txt", help="Directory containing .txt files")
     parser.add_argument("--output-dir", type=str, default="../data", help="Directory to save .mp3 files")
@@ -33,67 +22,76 @@ def main():
     output_dir = Path(args.output_dir)
     
     if not txt_dir.exists():
-        print(f"Text directory not found: {txt_dir}")
+        print(f"Error: Text directory not found: {txt_dir}")
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize TTS
+    # --- Initialization ---
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Initializing XTTS-v2 on {device}...")
     
     try:
+        # Load the model and move it to the determined device
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
     except Exception as e:
         print(f"Error loading model: {e}")
         return
 
-    # Check for speaker reference
+    # --- Speaker Reference Check ---
     speaker_wav = args.speaker_wav
     if not speaker_wav:
-        # Check if there is a default one in current dir
         default_ref = Path("speaker_ref.wav")
         if default_ref.exists():
             speaker_wav = str(default_ref)
         else:
-            print("WARNING: XTTS-v2 requires a speaker reference audio file (for voice cloning).")
+            print("\nWARNING: XTTS-v2 requires a speaker reference audio file (for voice cloning).")
             print("Please provide one using --speaker-wav or place 'speaker_ref.wav' in this directory.")
-            # We can't proceed easily without a speaker for XTTS usually unless we use speaker_idx which might not be available or stable.
-            # I'll exit if no speaker ref is found to avoid waste.
             return
 
     txt_files = list(txt_dir.glob("*.txt"))
-    print(f"Found {len(txt_files)} text files.")
+    print(f"Found {len(txt_files)} text files to process.")
 
-    for txt_file in txt_files:
+    # --- Batch Processing with Progress Bar ---
+    # tqdm wraps the list of files to display the progress bar
+    for txt_file in tqdm(txt_files, desc="Synthesizing", unit="file"):
         output_file = output_dir / (txt_file.stem + ".mp3")
         
         if output_file.exists():
-            print(f"Skipping {txt_file.name} (Output exists)")
+            tqdm.write(f"Skipping {txt_file.name} (Output exists)")
             continue
             
-        print(f"Processing {txt_file.name}...")
-        
         try:
             with open(txt_file, "r", encoding="utf-8") as f:
                 text_content = f.read()
 
             if not text_content.strip():
-                print("Empty file, skipping.")
+                tqdm.write(f"Empty file: {txt_file.name}, skipping.")
                 continue
 
-            # XTTS synthesis
-            # Note: tts_to_file is the high level API method
+            # --- Text Flow Fix ---
+            # 1. Replace line breaks (\n, \r) with a single space to prevent harsh pauses.
+            clean_text = text_content.replace("\n", " ").replace("\r", " ")
+            
+            # 2. Substitute multiple consecutive spaces with a single space.
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            # ---------------------
+
+            # XTTS synthesis with optimized parameters for natural flow
             tts.tts_to_file(
-                text=text_content, 
+                text=clean_text,
                 file_path=str(output_file),
                 speaker_wav=speaker_wav,
-                language=args.language
+                language=args.language,
+                enable_text_splitting=True
             )
-            print(f"Saved to {output_file}")
+            
+            tqdm.write(f"✅ Saved: {output_file.name}")
             
         except Exception as e:
-            print(f"Failed to process {txt_file.name}: {e}")
+            tqdm.write(f"❌ Failed to process {txt_file.name}: {e}")
+
+    print("\nBatch processing complete.")
 
 if __name__ == "__main__":
     main()

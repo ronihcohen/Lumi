@@ -6,6 +6,9 @@ from TTS.api import TTS
 from pydub import AudioSegment
 import tempfile
 from tqdm import tqdm
+import warnings
+
+warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*")
 
 MAX_CHARS = 200   # safe for XTTS
 

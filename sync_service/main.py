@@ -299,6 +299,7 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Audiobook synchronization tool.")
     parser.add_argument("--data-dir", type=str, default="../data", help="Directory containing audio files.")
+    parser.add_argument("--file", type=str, default=None, help="Specific file to process (overrides --data-dir)")
     parser.add_argument("--output-dir", type=str, default="../ui/data", help="Directory to save output files.")
     parser.add_argument("--model-size", type=str, default="base.en", 
                         choices=["tiny", "tiny.en", "base", "base.en", "small", "small.en", 
@@ -311,8 +312,16 @@ if __name__ == "__main__":
     data_dir = Path(args.data_dir)
     output_dir = Path(args.output_dir)
 
-    if not data_dir.exists():
+    if args.file:
+        audio_files = [Path(args.file)]
+    elif not data_dir.exists():
         logging.error(f"Data directory not found at '{data_dir}'")
+        audio_files = []
+    else:
+        audio_files = list(data_dir.glob("*.mp3"))
+        
+    if not audio_files:
+        logging.warning(f"No .mp3 files to process.")
     else:
         device = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
         logging.info(f"Loading Whisper model '{args.model_size}' on {device}...")
@@ -321,16 +330,12 @@ if __name__ == "__main__":
             model = WhisperModel(args.model_size, device=device, compute_type=args.compute_type)
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            audio_files = list(data_dir.glob("*.mp3"))
-            if not audio_files:
-                logging.warning(f"No .mp3 files found in {data_dir}.")
-            else:
-                logging.info(f"Found {len(audio_files)} MP3 file(s).")
-                for audio_file in audio_files:
-                    logging.info(f"--- Processing: {audio_file.name} ---")
-                    sanitized_name = create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
-                    
-                    # Move processed input file to output folder with sanitized name
+            logging.info(f"Found {len(audio_files)} MP3 file(s).")
+            for audio_file in audio_files:
+                logging.info(f"--- Processing: {audio_file.name} ---")
+                sanitized_name = create_sync_map_from_transcription(model, str(audio_file), str(output_dir))
+                
+                if sanitized_name:
                     sanitized_audio_name = f"{sanitized_name}.mp3"
                     shutil.move(str(audio_file), str(output_dir / sanitized_audio_name))
                     logging.info(f"Moved {audio_file.name} -> {sanitized_audio_name} to {output_dir}")

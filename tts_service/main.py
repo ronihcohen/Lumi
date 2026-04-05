@@ -69,6 +69,7 @@ def synthesize_chunks(pipeline, chunks, voice, output_file, speed=1.0):
 def main():
     parser = argparse.ArgumentParser(description="Kokoro-82M TTS audiobook generation")
     parser.add_argument("--txt-dir", type=str, default="../txt")
+    parser.add_argument("--txt-file", type=str, default=None, help="Specific txt file to process (overrides --txt-dir)")
     parser.add_argument("--output-dir", type=str, default="../ui/data")
     parser.add_argument("--voice", type=str, default="af_heart")
     parser.add_argument("--speed", type=float, default=1.0)
@@ -81,10 +82,12 @@ def main():
     print(f"Initializing Kokoro-82M with voice: {args.voice}")
     pipeline = KPipeline(lang_code='a')
 
-    for txt_file in txt_dir.glob("*.txt"):
-        if "Alice" not in txt_file.name:
-            continue
+    if args.txt_file:
+        txt_files = [Path(args.txt_file)]
+    else:
+        txt_files = list(txt_dir.glob("*.txt"))
 
+    for txt_file in txt_files:
         output_file = output_dir / (txt_file.stem + ".mp3")
 
         print("\n" + "=" * 40)

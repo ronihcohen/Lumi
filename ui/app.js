@@ -5,6 +5,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     const bookContent = document.getElementById('book-content');
     const bookSelector = document.getElementById('book-selector');
 
+    window.addEventListener('beforeunload', () => {
+        if (currentBook) {
+            const STORAGE_KEY = `lumi_${currentBook}_last_time`;
+            localStorage.setItem(STORAGE_KEY, audioPlayer.currentTime.toString());
+        }
+    });
+
     let wordsData = [];
     let syncMap = {};
     let sortedParagraphs = [];
@@ -14,57 +21,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     let currentSavePausePosition = null;
     const CHUNK_SIZE = 50;
 
-    let serverSettings = {};
-    let settingsLoaded = false;
-    let pendingSaves = {};
-    let syncTimeout = null;
-
-    function loadSettings() {
-        loadSettingsFromServer();
-    }
-
-    function loadSettingsFromServer() {
-        fetch('/api/settings').then(resp => resp.json()).then(data => {
-            serverSettings = data;
-            for (const [key, value] of Object.entries(serverSettings)) {
-                localStorage.setItem(key, value);
-            }
-            settingsLoaded = true;
-        }).catch(e => {
-            console.warn('Could not load settings from server:', e);
-        });
-    }
-
-    async function saveSetting(key, value) {
+    function saveSetting(key, value) {
         localStorage.setItem(key, value);
-        serverSettings[key] = value;
-        pendingSaves[key] = value;
-        
-        clearTimeout(syncTimeout);
-        syncTimeout = setTimeout(async () => {
-            const toSave = { ...pendingSaves };
-            pendingSaves = {};
-            for (const [k, v] of Object.entries(toSave)) {
-                try {
-                    await fetch(`/api/settings/${encodeURIComponent(k)}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ value: v })
-                    });
-                } catch (e) {
-                    console.warn('Could not save setting to server:', e);
-                }
-            }
-        }, 3000);
     }
 
     function getSetting(key, defaultValue) {
         const localValue = localStorage.getItem(key);
         if (localValue !== null) {
             return localValue;
-        }
-        if (settingsLoaded && serverSettings.hasOwnProperty(key)) {
-            return serverSettings[key];
         }
         return defaultValue;
     }
@@ -97,8 +61,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     function applyFontSize(size) {
         bookContent.style.fontSize = size + 'px';
     }
-
-    loadSettings();
 
     try {
         const booksResponse = await fetch('/api/books');
@@ -298,7 +260,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const savedTime = parseFloat(getSetting(STORAGE_KEY, '0'));
         let initialTime = (!isNaN(savedTime) && isFinite(savedTime)) ? savedTime : 0;
 
-        console.log(`Restoring position for ${currentBook}:`, initialTime);
+        console.log(`Restoring position for ${currentBook}:`, initialTime, 'key:', STORAGE_KEY);
 
         let pIdx = findClosestParagraphIndex(initialTime);
         let cIdx = Math.floor(pIdx / CHUNK_SIZE);
@@ -308,12 +270,54 @@ document.addEventListener('DOMContentLoaded', async () => {
             const restorePosition = () => {
                 audioPlayer.currentTime = initialTime;
                 console.log(`Position set to:`, audioPlayer.currentTime);
+                setTimeout(() => highlightWordAtTime(initialTime), 100);
             };
 
-            if (audioPlayer.readyState >= 2) {
+            if (audioPlayer.readyState >= 1) {
                 restorePosition();
             } else {
-                audioPlayer.addEventListener('canplay', restorePosition, { once: true });
+                audioPlayer.addEventListener('loadedmetadata', restorePosition, { once: true });
+            }
+        } else {
+            setTimeout(() => highlightWordAtTime(0), 100);
+        }
+
+        function highlightWordAtTime(time) {
+            const wordSpans = document.getElementsByClassName('word');
+            console.log('highlightWordAtTime called:', time, 'wordSpans:', wordSpans.length);
+            if (wordSpans.length === 0) return;
+
+            let found = -1;
+            let low = 0, high = wordSpans.length - 1;
+
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                const span = wordSpans[mid];
+                const start = parseFloat(span.getAttribute('data-start'));
+                const end = parseFloat(span.getAttribute('data-end'));
+
+                if (time >= start && time < end) {
+                    found = mid;
+                    break;
+                } else if (time < start) {
+                    high = mid - 1;
+                } else {
+                    low = mid + 1;
+                }
+            }
+
+            if (found === -1 && low < wordSpans.length) {
+                found = low;
+            }
+
+            if (found !== -1) {
+                const activeSpan = wordSpans[found];
+                const prev = document.querySelector('.active-word');
+                if (prev !== activeSpan) {
+                    if (prev) prev.classList.remove('active-word');
+                    activeSpan.classList.add('active-word');
+                    activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
             }
         }
 

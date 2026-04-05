@@ -59,7 +59,8 @@ def synthesize_chunks(pipeline, chunks, voice, output_file, speed=1.0):
             audio_arrays.append(audio)
 
     if audio_arrays:
-        final_audio = np.concatenate(audio_arrays)
+        silence = np.zeros(int(24000 * 0.5))
+        final_audio = np.concatenate([silence] + audio_arrays)
         sf.write(output_file, final_audio, 24000)
         print(f"✓ Saved to {output_file}")
     else:

@@ -17,7 +17,9 @@ rsync -av ui/data/ rony@tardis:~/code/Lumi/ui/data/
 ### Deploy UI Updates
 
 ```bash
-rsync -av ui/server.py ui/app.js ui/index.html rony@tardis:~/code/Lumi/ui/
+ssh rony@tardis
+cd ~/code/Lumi/ui
+git pull
 ```
 
 ### Start/Restart Server

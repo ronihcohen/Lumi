@@ -82,7 +82,7 @@ def main():
     pipeline = KPipeline(lang_code='a')
 
     for txt_file in txt_dir.glob("*.txt"):
-        if "alice_test" not in txt_file.name:
+        if "Alice" not in txt_file.name:
             continue
 
         output_file = output_dir / (txt_file.stem + ".mp3")

@@ -7,9 +7,17 @@ const PORT = process.env.PORT || 8000;
 const DATA_DIR = 'data';
 const STATIC_DIR = __dirname;
 
-const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://user:password@localhost:5432/my_database';
+const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://admin:tombalulul777@localhost:5432/my_database';
 
 const pool = new Pool({ connectionString: DATABASE_URL });
+
+pool.query(`
+  CREATE TABLE IF NOT EXISTS user_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+`).catch(e => console.error('Failed to initialize user_settings table:', e));
 
 const app = express();
 

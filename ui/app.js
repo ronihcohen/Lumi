@@ -242,7 +242,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
                 if (wordObj.start >= p.start) {
                     const wordText = wordObj.word.trim();
-                    if (!wordText || wordText.length < 2) {
+                    if (!wordText) {
                         wordIdx++;
                         continue;
                     }
@@ -250,7 +250,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     wordSpan.className = 'word';
                     wordSpan.textContent = wordText + ' ';
                     wordSpan.setAttribute('data-start', wordObj.start);
-                    wordSpan.setAttribute('data-end', wordObj.end);
+                    wordSpan.setAttribute('data-end', Math.max(wordObj.end, wordObj.start + 0.1));
                     pElement.appendChild(wordSpan);
                     hasWords = true;
                 }
@@ -352,9 +352,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            // If no exact match (gap between words), fall back to the last word that started
-            if (found === -1 && low > 0) {
-                found = low - 1;
+            // If no exact match (gap between words), fall back to the next word
+            if (found === -1 && low < wordSpans.length) {
+                found = low;
             }
 
             if (found !== -1) {

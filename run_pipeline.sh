@@ -27,6 +27,7 @@ fi
 
 BASENAME=$(basename "$TXT_FILE" .txt)
 OUTPUT_DIR="$PROJECT_DIR/ui/data"
+rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
 echo "=== Step 1: Running TTS service ==="

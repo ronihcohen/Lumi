@@ -1,31 +1,45 @@
+#!/usr/bin/env python3
+"""Kokoro-82M TTS for audiobook generation."""
+
 import argparse
-import torch
 import re
+import numpy as np
 from pathlib import Path
-from TTS.api import TTS
-from pydub import AudioSegment
-from pydub.generators import Sine
-import tempfile
 from tqdm import tqdm
 import warnings
 
-warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*")
+import soundfile as sf
+from kokoro import KPipeline
 
-MAX_CHARS = 200   # safe for XTTS
-OVERLAP_MS = 200  # smooth transitions between chunks
+warnings.filterwarnings("ignore")
+
+MAX_TOKENS = 200
 
 
-def split_text(text, max_chars=MAX_CHARS):
-    """Split text manually into safe ~200 char chunks."""
+def split_text(text, max_tokens=MAX_TOKENS):
+    """Split text into chunks respecting sentence boundaries."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current = ""
 
-    for word in text.split():
-        if len(current) + len(word) + 1 <= max_chars:
-            current += " " + word if current else word
+    for sentence in sentences:
+        words = sentence.split()
+        if len(current) + len(words) <= max_tokens:
+            current += " " + sentence if current else sentence
         else:
-            chunks.append(current)
-            current = word
+            if current:
+                chunks.append(current)
+            if len(words) <= max_tokens:
+                current = sentence
+            else:
+                current = ""
+                for word in words:
+                    if len(current.split()) + 1 <= max_tokens:
+                        current += " " + word if current else word
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = word
 
     if current:
         chunks.append(current)
@@ -33,67 +47,58 @@ def split_text(text, max_chars=MAX_CHARS):
     return chunks
 
 
-def synthesize_chunks(tts, chunks, speaker_wav, language, output_file):
-    """Generate audio per chunk and join into one MP3 using tqdm."""
+def synthesize_chunks(pipeline, chunks, voice, output_file, speed=1.0):
+    """Generate audio per chunk and concatenate."""
     print(f"Total chunks: {len(chunks)}")
 
-    final_audio = AudioSegment.silent(duration=0)
+    audio_arrays = []
 
-    for i, chunk in enumerate(tqdm(chunks, desc="Synthesizing chunks", unit="chunk")):
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp_path = tmp.name
+    for chunk in tqdm(chunks, desc="Synthesizing", unit="chunk"):
+        generator = pipeline(chunk, voice=voice, speed=speed)
+        for _, _, audio in generator:
+            audio_arrays.append(audio)
 
-        tts.tts_to_file(
-            text=chunk,
-            file_path=tmp_path,
-            speaker_wav=speaker_wav,
-            language=language,
-            enable_text_splitting=False
-        )
-
-        audio = AudioSegment.from_wav(tmp_path)
-
-        if i == 0:
-            final_audio = audio
-        else:
-            final_audio = final_audio.append(audio, crossfade=OVERLAP_MS)
-
-    final_audio.export(output_file, format="mp3")
-    print("✔ Final MP3 saved.")
+    if audio_arrays:
+        final_audio = np.concatenate(audio_arrays)
+        sf.write(output_file, final_audio, 24000)
+        print(f"✓ Saved to {output_file}")
+    else:
+        print("✗ No audio generated")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch TTS using XTTS-v2")
+    parser = argparse.ArgumentParser(description="Kokoro-82M TTS audiobook generation")
     parser.add_argument("--txt-dir", type=str, default="../txt")
-    parser.add_argument("--output-dir", type=str, default="../data")
-    parser.add_argument("--speaker-wav", type=str, default=None)
-    parser.add_argument("--language", type=str, default="en")
+    parser.add_argument("--output-dir", type=str, default="../ui/data")
+    parser.add_argument("--voice", type=str, default="af_heart")
+    parser.add_argument("--speed", type=float, default=1.0)
     args = parser.parse_args()
 
     txt_dir = Path(args.txt_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Initializing XTTS-v2 on {device}...")
-    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
-
-    speaker_wav = args.speaker_wav or "speaker_ref.wav"
+    print(f"Initializing Kokoro-82M with voice: {args.voice}")
+    pipeline = KPipeline(lang_code='a')
 
     for txt_file in txt_dir.glob("*.txt"):
+        if "alice_test" not in txt_file.name:
+            continue
+
         output_file = output_dir / (txt_file.stem + ".mp3")
 
-        print("\n==============================")
+        print("\n" + "=" * 40)
         print(f"Processing: {txt_file.name}")
-        print("==============================")
+        print("=" * 40)
 
         text = Path(txt_file).read_text(encoding="utf-8")
         text = re.sub(r'\s+', ' ', text).strip()
 
-        print("Splitting text into chunks…")
+        print("Splitting text into chunks...")
         chunks = split_text(text)
+        print(f"Created {len(chunks)} chunks")
 
-        synthesize_chunks(tts, chunks, speaker_wav, args.language, output_file)
+        synthesize_chunks(pipeline, chunks, args.voice, output_file, args.speed)
 
 
 if __name__ == "__main__":

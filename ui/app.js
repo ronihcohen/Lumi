@@ -171,6 +171,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             ]);
 
             wordsData = await wordsResponse.json();
+            wordsData.sort((a, b) => a.start - b.start);
             syncMap = await syncResponse.json();
             console.log("Data loaded. Words:", wordsData.length);
 
@@ -351,13 +352,19 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
             }
 
-            if (found !== -1) {
-                const prev = document.querySelector('.active-word');
-                if (prev) prev.classList.remove('active-word');
+            // If no exact match (gap between words), fall back to the last word that started
+            if (found === -1 && low > 0) {
+                found = low - 1;
+            }
 
+            if (found !== -1) {
                 const activeSpan = wordSpans[found];
-                activeSpan.classList.add('active-word');
-                activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const prev = document.querySelector('.active-word');
+                if (prev !== activeSpan) {
+                    if (prev) prev.classList.remove('active-word');
+                    activeSpan.classList.add('active-word');
+                    activeSpan.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
             }
         }
 

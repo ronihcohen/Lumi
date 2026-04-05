@@ -291,6 +291,7 @@ def create_sync_map_from_transcription(model: WhisperModel, audio_path: str, out
             word_level_data.extend(seg["words"])
 
     full_text = " ".join(full_text_segments)
+    word_level_data.sort(key=lambda w: w["start"])
     save_sync_outputs(output_dir, output_base_name, sync_map, word_level_data, segments, full_text)
 
     gc.collect()

@@ -3,11 +3,17 @@ import socketserver
 import sys
 import os
 import json
+import psycopg2
+from urllib.parse import urlparse, parse_qs
 
 PORT = 8000
-# Serve files from the directory containing this script
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 DATA_DIRECTORY = "data"
+
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://admin:tombalul777@localhost:5432/my_database')
+
+def get_db_connection():
+    return psycopg2.connect(DATABASE_URL)
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -43,8 +49,74 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
         
+        # API endpoint to get all settings
+        if self.path == '/api/settings':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("SELECT key, value FROM user_settings")
+                settings = {row[0]: row[1] for row in cur.fetchall()}
+                cur.close()
+                conn.close()
+                self.wfile.write(json.dumps(settings).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        
+        # API endpoint to get/update specific setting
+        if self.path.startswith('/api/settings/'):
+            key = self.path[len('/api/settings/'):]
+            if self.request.command == 'GET':
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Cache-Control', 'no-cache')
+                self.end_headers()
+                try:
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    cur.execute("SELECT value FROM user_settings WHERE key = %s", (key,))
+                    row = cur.fetchone()
+                    cur.close()
+                    conn.close()
+                    value = row[0] if row else None
+                    self.wfile.write(json.dumps({"value": value}).encode())
+                except Exception as e:
+                    self.wfile.write(json.dumps({"error": str(e)}).encode())
+                return
+        
         # Default file serving
         return super().do_GET()
+    
+    def do_PUT(self):
+        if self.path.startswith('/api/settings/'):
+            key = self.path[len('/api/settings/'):]
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode())
+            value = data.get('value')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            try:
+                conn = get_db_connection()
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO user_settings (key, value, updated_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+                """, (key, value))
+                conn.commit()
+                cur.close()
+                conn.close()
+                self.wfile.write(json.dumps({"success": True}).encode())
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            return
+        self.send_error(501, "Unsupported method")
     
     def end_headers(self):
         # Explicitly ensure Range support header is sent

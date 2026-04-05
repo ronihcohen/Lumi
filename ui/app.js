@@ -14,21 +14,75 @@ document.addEventListener('DOMContentLoaded', async () => {
     let currentSavePausePosition = null;
     const CHUNK_SIZE = 50;
 
-    // Font size controls
+    let serverSettings = {};
+    let settingsLoaded = false;
+    let pendingSaves = {};
+    let syncTimeout = null;
+
+    function loadSettings() {
+        loadSettingsFromServer();
+    }
+
+    function loadSettingsFromServer() {
+        fetch('/api/settings').then(resp => resp.json()).then(data => {
+            serverSettings = data;
+            for (const [key, value] of Object.entries(serverSettings)) {
+                localStorage.setItem(key, value);
+            }
+            settingsLoaded = true;
+        }).catch(e => {
+            console.warn('Could not load settings from server:', e);
+        });
+    }
+
+    async function saveSetting(key, value) {
+        localStorage.setItem(key, value);
+        serverSettings[key] = value;
+        pendingSaves[key] = value;
+        
+        clearTimeout(syncTimeout);
+        syncTimeout = setTimeout(async () => {
+            const toSave = { ...pendingSaves };
+            pendingSaves = {};
+            for (const [k, v] of Object.entries(toSave)) {
+                try {
+                    await fetch(`/api/settings/${encodeURIComponent(k)}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ value: v })
+                    });
+                } catch (e) {
+                    console.warn('Could not save setting to server:', e);
+                }
+            }
+        }, 3000);
+    }
+
+    function getSetting(key, defaultValue) {
+        const localValue = localStorage.getItem(key);
+        if (localValue !== null) {
+            return localValue;
+        }
+        if (settingsLoaded && serverSettings.hasOwnProperty(key)) {
+            return serverSettings[key];
+        }
+        return defaultValue;
+    }
+
     const increaseFontBtn = document.getElementById('increase-font');
     const decreaseFontBtn = document.getElementById('decrease-font');
     const FONT_SIZE_KEY = 'lumi_font_size';
     const MIN_FONT_SIZE = 12;
     const MAX_FONT_SIZE = 48;
 
-    let currentFontSize = parseInt(localStorage.getItem(FONT_SIZE_KEY)) || 18;
+    let currentFontSize = parseInt(getSetting(FONT_SIZE_KEY, '18')) || 18;
     applyFontSize(currentFontSize);
 
     increaseFontBtn.addEventListener('click', () => {
         if (currentFontSize < MAX_FONT_SIZE) {
             currentFontSize += 2;
             applyFontSize(currentFontSize);
-            localStorage.setItem(FONT_SIZE_KEY, currentFontSize);
+            saveSetting(FONT_SIZE_KEY, currentFontSize.toString());
         }
     });
 
@@ -36,7 +90,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (currentFontSize > MIN_FONT_SIZE) {
             currentFontSize -= 2;
             applyFontSize(currentFontSize);
-            localStorage.setItem(FONT_SIZE_KEY, currentFontSize);
+            saveSetting(FONT_SIZE_KEY, currentFontSize.toString());
         }
     });
 
@@ -44,7 +98,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         bookContent.style.fontSize = size + 'px';
     }
 
-    // Load available books
+    loadSettings();
+
     try {
         const booksResponse = await fetch('/api/books');
         const books = await booksResponse.json();
@@ -56,8 +111,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             return;
         }
 
-        // Get last selected book or use first one
-        const lastBook = localStorage.getItem('lumi_selected_book');
+        const lastBook = getSetting('lumi_selected_book', '');
         let selectedBook = books.includes(lastBook) ? lastBook : books[0];
 
         books.forEach(book => {
@@ -68,23 +122,20 @@ document.addEventListener('DOMContentLoaded', async () => {
             bookSelector.appendChild(option);
         });
 
-        // Handle book selection change
         bookSelector.addEventListener('change', () => {
             const newBook = bookSelector.value;
             if (newBook && newBook !== currentBook) {
-                // Save current position before switching (regardless of playback state)
                 if (currentBook) {
                     const oldStorageKey = `lumi_${currentBook}_last_time`;
-                    localStorage.setItem(oldStorageKey, audioPlayer.currentTime);
+                    saveSetting(oldStorageKey, audioPlayer.currentTime.toString());
                     console.log(`Saved position for ${currentBook}:`, audioPlayer.currentTime);
                 }
 
-                localStorage.setItem('lumi_selected_book', newBook);
+                saveSetting('lumi_selected_book', newBook);
                 loadBook(newBook);
             }
         });
 
-        // Load initial book
         await loadBook(selectedBook);
 
     } catch (error) {
@@ -106,16 +157,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function loadBook(bookName) {
         try {
-            cleanupListeners(); // Cleanup old listeners BEFORE changing source/loading
+            cleanupListeners();
 
             console.log("Loading book:", bookName);
             currentBook = bookName;
 
-            // Update audio source
             audioSource.src = `data/${encodeURIComponent(bookName)}.mp3`;
             audioPlayer.load();
 
-            // Fetch book data
             const [wordsResponse, syncResponse] = await Promise.all([
                 fetch(`data/${encodeURIComponent(bookName)}_transcribed_words.json`),
                 fetch(`data/${encodeURIComponent(bookName)}_sync_map.json`)
@@ -125,7 +174,6 @@ document.addEventListener('DOMContentLoaded', async () => {
             syncMap = await syncResponse.json();
             console.log("Data loaded. Words:", wordsData.length);
 
-            // Pre-process paragraphs
             const pIds = Object.keys(syncMap).sort((a, b) => {
                 const numA = parseInt(a.slice(1));
                 const numB = parseInt(b.slice(1));
@@ -138,10 +186,8 @@ document.addEventListener('DOMContentLoaded', async () => {
                 end: syncMap[id].end
             }));
 
-            // Setup sync with book-specific storage key
             setupSync();
 
-            // Event Delegation for word clicks
             bookContent.removeEventListener('click', handleWordClick);
             bookContent.addEventListener('click', handleWordClick);
 
@@ -185,22 +231,33 @@ document.addEventListener('DOMContentLoaded', async () => {
         chunkParagraphs.forEach(p => {
             const pElement = document.createElement('p');
             pElement.id = p.id;
+            pElement.style.margin = '0';
+            pElement.style.display = 'inline';
 
+            let hasWords = false;
             while (wordIdx < wordsData.length) {
                 const wordObj = wordsData[wordIdx];
                 if (wordObj.start >= p.end) break;
 
                 if (wordObj.start >= p.start) {
+                    const wordText = wordObj.word.trim();
+                    if (!wordText || wordText.length < 2) {
+                        wordIdx++;
+                        continue;
+                    }
                     const wordSpan = document.createElement('span');
                     wordSpan.className = 'word';
-                    wordSpan.textContent = wordObj.word;
+                    wordSpan.textContent = wordText + ' ';
                     wordSpan.setAttribute('data-start', wordObj.start);
                     wordSpan.setAttribute('data-end', wordObj.end);
                     pElement.appendChild(wordSpan);
+                    hasWords = true;
                 }
                 wordIdx++;
             }
-            fragment.appendChild(pElement);
+            if (hasWords) {
+                fragment.appendChild(pElement);
+            }
         });
 
         bookContent.appendChild(fragment);
@@ -234,11 +291,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     function setupSync() {
-        // Book-specific storage key
         const STORAGE_KEY = `lumi_${currentBook}_last_time`;
         let lastSaveTime = 0;
 
-        const savedTime = parseFloat(localStorage.getItem(STORAGE_KEY));
+        const savedTime = parseFloat(getSetting(STORAGE_KEY, '0'));
         let initialTime = (!isNaN(savedTime) && isFinite(savedTime)) ? savedTime : 0;
 
         console.log(`Restoring position for ${currentBook}:`, initialTime);
@@ -247,7 +303,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         let cIdx = Math.floor(pIdx / CHUNK_SIZE);
         renderChunk(cIdx);
 
-        // Restore playback position
         if (initialTime > 0) {
             const restorePosition = () => {
                 audioPlayer.currentTime = initialTime;
@@ -255,10 +310,8 @@ document.addEventListener('DOMContentLoaded', async () => {
             };
 
             if (audioPlayer.readyState >= 2) {
-                // Audio is already loaded enough to seek
                 restorePosition();
             } else {
-                // Wait until we can seek
                 audioPlayer.addEventListener('canplay', restorePosition, { once: true });
             }
         }
@@ -268,7 +321,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             const now = Date.now();
             if (now - lastSaveTime > 1000) {
-                localStorage.setItem(STORAGE_KEY, currentTime);
+                saveSetting(STORAGE_KEY, currentTime.toString());
                 lastSaveTime = now;
             }
 
@@ -309,14 +362,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         function savePausePosition() {
-            localStorage.setItem(STORAGE_KEY, audioPlayer.currentTime);
+            saveSetting(STORAGE_KEY, audioPlayer.currentTime.toString());
         }
 
-        // Store references for next cleanup
         currentUpdateHighlight = updateHighlight;
         currentSavePausePosition = savePausePosition;
 
-        // Add new event listeners
         audioPlayer.addEventListener('timeupdate', updateHighlight);
         audioPlayer.addEventListener('seeked', updateHighlight);
         audioPlayer.addEventListener('pause', savePausePosition);

@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 from TTS.api import TTS
 from pydub import AudioSegment
+from pydub.generators import Sine
 import tempfile
 from tqdm import tqdm
 import warnings
@@ -11,6 +12,7 @@ import warnings
 warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*")
 
 MAX_CHARS = 200   # safe for XTTS
+OVERLAP_MS = 200  # smooth transitions between chunks
 
 
 def split_text(text, max_chars=MAX_CHARS):
@@ -37,23 +39,24 @@ def synthesize_chunks(tts, chunks, speaker_wav, language, output_file):
 
     final_audio = AudioSegment.silent(duration=0)
 
-    # tqdm progress bar
-    for chunk in tqdm(chunks, desc="Synthesizing chunks", unit="chunk"):
-        # temporary WAV file
+    for i, chunk in enumerate(tqdm(chunks, desc="Synthesizing chunks", unit="chunk")):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
 
-        # synthesize one chunk
         tts.tts_to_file(
             text=chunk,
             file_path=tmp_path,
             speaker_wav=speaker_wav,
             language=language,
-            enable_text_splitting=False  # we do manual splitting
+            enable_text_splitting=False
         )
 
         audio = AudioSegment.from_wav(tmp_path)
-        final_audio += audio
+
+        if i == 0:
+            final_audio = audio
+        else:
+            final_audio = final_audio.append(audio, crossfade=OVERLAP_MS)
 
     final_audio.export(output_file, format="mp3")
     print("✔ Final MP3 saved.")
